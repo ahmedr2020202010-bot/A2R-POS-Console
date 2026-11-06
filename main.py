@@ -13,6 +13,8 @@ import database as db
 import reports as rep
 import pos_engine as engine
 import theme
+from watchdog import AutoPrintWorker
+from auth_window import AuthDialog
 
 APP_VERSION = "v51"
 APP_OWNER = "Ahmed Ramadan"
@@ -80,6 +82,7 @@ class A2RConsole(QMainWindow):
         self.last_detailed_records = []
         self.system_total_sum = 0.0
         self.last_generated_excel = ""
+        self.is_supervisor = False
         
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -94,6 +97,12 @@ class A2RConsole(QMainWindow):
         self.setup_system_tray()
         
         self.switch_to_mini()
+        
+        # Start Auto Print Watchdog
+        self.downloads_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        self.print_worker = AutoPrintWorker(self.downloads_dir)
+        self.print_worker.printed_signal.connect(self.on_receipt_printed)
+        self.print_worker.start()
 
     def setup_mini_view(self):
         self.mini_widget = QWidget()
@@ -108,9 +117,13 @@ class A2RConsole(QMainWindow):
         status.setStyleSheet("color: #10B981; font-weight: bold; margin-top: 10px;")
         layout.addWidget(status, alignment=Qt.AlignCenter)
         
+        self.lbl_print_count = QLabel("🖨️ المطبوع اليوم تلقائياً: 0 إيصال")
+        self.lbl_print_count.setStyleSheet("color: #94A3B8; font-weight: bold;")
+        layout.addWidget(self.lbl_print_count, alignment=Qt.AlignCenter)
+        
         self.btn_full_console = QPushButton("🖥️ النسخة الكاملة")
-        self.btn_full_console.setStyleSheet("background-color: #DC2626;")
-        self.btn_full_console.clicked.connect(self.switch_to_full)
+        self.btn_full_console.setStyleSheet("background-color: #DC2626; margin-top: 10px;")
+        self.btn_full_console.clicked.connect(self.request_full_console)
         layout.addWidget(self.btn_full_console)
         
         self.stacked_widget.addWidget(self.mini_widget)
@@ -125,6 +138,10 @@ class A2RConsole(QMainWindow):
         header.addWidget(logo)
         header.addStretch()
         
+        self.lbl_role = QLabel("● USER")
+        self.lbl_role.setStyleSheet("color: #10B981; font-weight: bold; border: 1px solid #10B981; padding: 4px; border-radius: 4px;")
+        header.addWidget(self.lbl_role)
+        
         self.btn_back_mini = QPushButton("⚡ وضع الميني")
         self.btn_back_mini.setStyleSheet("background-color: #334155;")
         self.btn_back_mini.clicked.connect(self.switch_to_mini)
@@ -136,8 +153,7 @@ class A2RConsole(QMainWindow):
         
         path_layout = QHBoxLayout()
         self.path_input = QLineEdit()
-        default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
-        self.path_input.setText(default_dir)
+        self.path_input.setText(os.path.join(os.path.expanduser("~"), "Downloads"))
         path_layout.addWidget(self.path_input)
         
         btn_browse = QPushButton("تحديد")
@@ -165,12 +181,11 @@ class A2RConsole(QMainWindow):
         btn_view_rec.clicked.connect(self.open_records_viewer)
         mid_layout.addWidget(btn_view_rec)
         
-        btn_open_excel = QPushButton("📊 فتح الإكسيل")
-        btn_open_excel.setStyleSheet("background-color: #059669;")
-        btn_open_excel.clicked.connect(self.open_excel)
-        mid_layout.addWidget(btn_open_excel)
+        self.btn_open_excel = QPushButton("📊 فتح الإكسيل")
+        self.btn_open_excel.setStyleSheet("background-color: #059669;")
+        self.btn_open_excel.clicked.connect(self.open_excel)
+        mid_layout.addWidget(self.btn_open_excel)
         
-        # --- NEW BUTTON: Print Photocopy Slip ---
         btn_print_slip = QPushButton("🖨️ إيصال تصوير")
         btn_print_slip.setStyleSheet("background-color: #D97706;")
         btn_print_slip.clicked.connect(self.open_print_slip_window)
@@ -189,24 +204,50 @@ class A2RConsole(QMainWindow):
         layout.addLayout(mid_layout)
         layout.addStretch()
         
-        tools_layout = QHBoxLayout()
+        self.tools_layout = QHBoxLayout()
         self.btn_archive = QPushButton("📚 سجل الأرشيف")
         self.btn_archive.setStyleSheet("background-color: #7C3AED;")
         self.btn_archive.clicked.connect(self.open_archive_history)
-        tools_layout.addWidget(self.btn_archive)
+        self.tools_layout.addWidget(self.btn_archive)
         
         self.btn_pos_close = QPushButton("🧾 تقفيل POS")
         self.btn_pos_close.setStyleSheet("background-color: #0F766E;")
         self.btn_pos_close.clicked.connect(self.open_closing_window)
-        tools_layout.addWidget(self.btn_pos_close)
+        self.tools_layout.addWidget(self.btn_pos_close)
         
         self.btn_pos_pay = QPushButton("💳 إيصالات الدفع")
         self.btn_pos_pay.setStyleSheet("background-color: #B45309;")
         self.btn_pos_pay.clicked.connect(self.open_payments_window)
-        tools_layout.addWidget(self.btn_pos_pay)
+        self.tools_layout.addWidget(self.btn_pos_pay)
         
-        layout.addLayout(tools_layout)
+        layout.addLayout(self.tools_layout)
         self.stacked_widget.addWidget(self.full_widget)
+
+    def request_full_console(self):
+        auth = AuthDialog(self)
+        if auth.exec():
+            self.is_supervisor = auth.is_supervisor
+            
+            # Show/Hide Admin features
+            if self.is_supervisor:
+                self.lbl_role.setText("● ADMIN")
+                self.lbl_role.setStyleSheet("color: #EF4444; font-weight: bold; border: 1px solid #EF4444; padding: 4px; border-radius: 4px;")
+                self.btn_open_excel.show()
+                self.btn_archive.show()
+                self.btn_pos_close.show()
+                self.btn_pos_pay.show()
+            else:
+                self.lbl_role.setText("● USER")
+                self.lbl_role.setStyleSheet("color: #10B981; font-weight: bold; border: 1px solid #10B981; padding: 4px; border-radius: 4px;")
+                self.btn_open_excel.hide()
+                self.btn_archive.hide()
+                self.btn_pos_close.hide()
+                self.btn_pos_pay.hide()
+                
+            self.switch_to_full()
+
+    def on_receipt_printed(self, filename, total_count):
+        self.lbl_print_count.setText(f"🖨️ المطبوع اليوم تلقائياً: {total_count} إيصال")
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "اختر مسار الإيصالات", self.path_input.text())
@@ -239,14 +280,11 @@ class A2RConsole(QMainWindow):
         self.system_total_sum = total_sum
         self.last_generated_excel = excel_path
         self.lbl_status.setText(f"✓ اكتملت المعالجة: {len(records)} إيصال | الإجمالي: {total_sum:,.2f} ج.م")
-        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!
-تم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.
-تم إنشاء التقرير: {os.path.basename(excel_path)}")
+        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!\nتم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.\nتم إنشاء التقرير: {os.path.basename(excel_path)}")
 
     def on_error(self, err):
         self.btn_run.setEnabled(True)
-        QMessageBox.critical(self, "خطأ", f"فشل المعالجة:
-{err}")
+        QMessageBox.critical(self, "خطأ", f"فشل المعالجة:\n{err}")
 
     def open_excel(self):
         if self.last_generated_excel and os.path.exists(self.last_generated_excel):
@@ -279,60 +317,39 @@ class A2RConsole(QMainWindow):
 
     # --- Windows Openers ---
     def open_closing_window(self):
-        try:
-            from closing_window import ClosingWindow
-            self.cw = ClosingWindow(self)
-            self.cw.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from closing_window import ClosingWindow
+        self.cw = ClosingWindow(self)
+        self.cw.exec()
 
     def open_payments_window(self):
-        try:
-            from payments_window import PaymentsWindow
-            self.pw = PaymentsWindow(self)
-            self.pw.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from payments_window import PaymentsWindow
+        self.pw = PaymentsWindow(self)
+        self.pw.exec()
             
     def open_records_viewer(self):
-        try:
-            from records_viewer import RecordsViewerWindow
-            self.rv = RecordsViewerWindow(self, records=self.last_detailed_records)
-            self.rv.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from records_viewer import RecordsViewerWindow
+        self.rv = RecordsViewerWindow(self, records=self.last_detailed_records)
+        self.rv.exec()
 
     def open_cash_window(self):
-        try:
-            from cash_window import CashWindow
-            self.cash_win = CashWindow(self, system_total=self.system_total_sum)
-            self.cash_win.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from cash_window import CashWindow
+        self.cash_win = CashWindow(self, system_total=self.system_total_sum)
+        self.cash_win.exec()
 
     def open_manual_window(self):
-        try:
-            from manual_window import ManualReceiptWindow
-            self.man_win = ManualReceiptWindow(self)
-            self.man_win.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from manual_window import ManualReceiptWindow
+        self.man_win = ManualReceiptWindow(self)
+        self.man_win.exec()
 
     def open_print_slip_window(self):
-        try:
-            from print_slip_window import PrintSlipWindow
-            self.slip_win = PrintSlipWindow(self)
-            self.slip_win.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from print_slip_window import PrintSlipWindow
+        self.slip_win = PrintSlipWindow(self)
+        self.slip_win.exec()
             
     def open_archive_history(self):
-        try:
-            from archive_history import ArchiveHistoryWindow
-            self.arch_win = ArchiveHistoryWindow(self)
-            self.arch_win.exec()
-        except ImportError as e:
-            QMessageBox.warning(self, "خطأ", str(e))
+        from archive_history import ArchiveHistoryWindow
+        self.arch_win = ArchiveHistoryWindow(self)
+        self.arch_win.exec()
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
