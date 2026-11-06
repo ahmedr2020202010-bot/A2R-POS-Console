@@ -1,15 +1,81 @@
 import sys
 import os
+import datetime
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QPushButton, QLabel, QLineEdit, QProgressBar, QMessageBox, 
-    QSystemTrayIcon, QMenu, QStackedWidget, QFrame
+    QSystemTrayIcon, QMenu, QStackedWidget, QFrame, QFileDialog
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction
+
+# استيراد ملفات المشروع الأخرى
+import database as db
+import reports as rep
+import pos_engine as engine
 
 APP_VERSION = "v51"
 APP_OWNER = "Ahmed Ramadan"
+
+class MainProcessingWorker(QThread):
+    progress_update = Signal(int, int, str)
+    finished_processing = Signal(list, float, str) # records, total_sum, excel_path
+    error_occurred = Signal(str)
+
+    def __init__(self, folder_path):
+        super().__init__()
+        self.folder_path = folder_path
+        self.is_running = True
+
+    def run(self):
+        try:
+            valid_exts = ('.jpg', '.png', '.jpeg', '.pdf')
+            files = []
+            for root, dirs, f_names in os.walk(self.folder_path):
+                for f in f_names:
+                    if f.lower().endswith(valid_exts):
+                        files.append(os.path.join(root, f))
+            
+            total_files = len(files)
+            if total_files == 0:
+                raise ValueError("لا يوجد إيصالات في هذا المجلد.")
+
+            records = []
+            total_sum = 0.0
+
+            for i, file_path in enumerate(files):
+                if not self.is_running:
+                    break
+                
+                self.progress_update.emit(i + 1, total_files, f"جاري معالجة: {os.path.basename(file_path)}")
+                
+                # استدعاء محرك الـ OCR الحقيقي من pos_engine
+                # كمثال، نستخدم الدالة المبدئية التي أنشأناها
+                res = engine.mock_closing_scan(file_path)
+                
+                # تهيئة السجل ليناسب واجهة "عرض السجلات" و "الإكسيل"
+                rec = {
+                    "order": i + 1,
+                    "unit": res.get("unit", "غير محدد"),
+                    "plate": "-", # لو فيه دالة لاستخراج اللوحة نضيفها
+                    "name": "-",
+                    "amount": res.get("amount", 0.0),
+                    "time": datetime.datetime.now().strftime("%H:%M"),
+                    "status": res.get("status", "✓"),
+                    "file": os.path.basename(file_path),
+                    "path": file_path
+                }
+                records.append(rec)
+                total_sum += rec["amount"]
+
+            # إنشاء تقرير الإكسيل الحقيقي
+            date_str = datetime.datetime.now().strftime("%d-%m-%Y")
+            excel_path = os.path.join(db.DOCUMENTS_DIR, f"Insurance_Report_{date_str}.xlsx")
+            rep.write_excel_report(records, excel_path)
+
+            self.finished_processing.emit(records, total_sum, excel_path)
+        except Exception as e:
+            self.error_occurred.emit(str(e))
 
 class A2RConsole(QMainWindow):
     def __init__(self):
@@ -17,7 +83,12 @@ class A2RConsole(QMainWindow):
         self.setWindowTitle(f"A2R Operations Console - {APP_OWNER}")
         self.setMinimumSize(440, 210)
         
-        self.system_total_sum = 2500.50 # Dummy system total for testing
+        # تهيئة قاعدة البيانات عند بدء البرنامج
+        db.init_db()
+
+        self.last_detailed_records = []
+        self.system_total_sum = 0.0
+        self.last_generated_excel = ""
         
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
@@ -79,17 +150,20 @@ class A2RConsole(QMainWindow):
         
         path_layout = QHBoxLayout()
         self.path_input = QLineEdit()
-        self.path_input.setPlaceholderText("مسار مجلد الإيصالات...")
+        default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        self.path_input.setText(default_dir)
         self.path_input.setStyleSheet("background-color: #0A131F; padding: 6px; border: 1px solid #1E2E42; color: white;")
         path_layout.addWidget(self.path_input)
         
         btn_browse = QPushButton("تحديد")
         btn_browse.setStyleSheet("background-color: #0284C7; color: white; padding: 6px;")
+        btn_browse.clicked.connect(self.browse_folder)
         path_layout.addWidget(btn_browse)
         card_layout.addLayout(path_layout)
         
         self.btn_run = QPushButton("⚡ بدء استخراج ومعالجة البيانات")
         self.btn_run.setStyleSheet("background-color: #10B981; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
+        self.btn_run.clicked.connect(self.start_processing)
         card_layout.addWidget(self.btn_run)
         
         self.progress_bar = QProgressBar()
@@ -97,14 +171,23 @@ class A2RConsole(QMainWindow):
         self.progress_bar.setStyleSheet("QProgressBar { border: 1px solid #1E2E42; background: #0A131F; } QProgressBar::chunk { background-color: #00FF66; }")
         card_layout.addWidget(self.progress_bar)
         
+        self.lbl_status = QLabel("جاهز")
+        self.lbl_status.setStyleSheet("color: #8FA3B8; font-size: 11px;")
+        card_layout.addWidget(self.lbl_status)
+        
         layout.addWidget(card)
         
-        # Middle Bar (View Records & Daily Tools)
+        # Middle Bar
         mid_layout = QHBoxLayout()
         btn_view_rec = QPushButton("🔍 عرض السجلات والمطابقة")
         btn_view_rec.setStyleSheet("background-color: #0284C7; color: white; padding: 8px; font-weight: bold;")
         btn_view_rec.clicked.connect(self.open_records_viewer)
         mid_layout.addWidget(btn_view_rec)
+        
+        btn_open_excel = QPushButton("📊 فتح الإكسيل")
+        btn_open_excel.setStyleSheet("background-color: #059669; color: white; padding: 8px; font-weight: bold;")
+        btn_open_excel.clicked.connect(self.open_excel)
+        mid_layout.addWidget(btn_open_excel)
 
         btn_manual = QPushButton("➕ إضافة يدوي")
         btn_manual.setStyleSheet("background-color: #0F766E; color: white; padding: 8px;")
@@ -140,6 +223,57 @@ class A2RConsole(QMainWindow):
         
         layout.addLayout(tools_layout)
         self.stacked_widget.addWidget(self.full_widget)
+
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "اختر مسار الإيصالات", self.path_input.text())
+        if folder:
+            self.path_input.setText(folder)
+
+    def start_processing(self):
+        folder = self.path_input.text().strip()
+        if not os.path.exists(folder):
+            QMessageBox.warning(self, "خطأ", "المسار غير موجود!")
+            return
+            
+        self.btn_run.setEnabled(False)
+        self.progress_bar.setValue(0)
+        
+        self.worker = MainProcessingWorker(folder)
+        self.worker.progress_update.connect(self.update_progress)
+        self.worker.finished_processing.connect(self.on_processing_finished)
+        self.worker.error_occurred.connect(self.on_error)
+        self.worker.start()
+
+    def update_progress(self, current, total, text):
+        pct = int((current / total) * 100)
+        self.progress_bar.setValue(pct)
+        self.lbl_status.setText(text)
+
+    def on_processing_finished(self, records, total_sum, excel_path):
+        self.btn_run.setEnabled(True)
+        self.progress_bar.setValue(100)
+        
+        # حفظ البيانات الحقيقية في التطبيق لاستخدامها في النوافذ الأخرى
+        self.last_detailed_records = records
+        self.system_total_sum = total_sum
+        self.last_generated_excel = excel_path
+        
+        self.lbl_status.setText(f"✓ اكتملت المعالجة: {len(records)} إيصال | الإجمالي: {total_sum:,.2f} ج.م")
+        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!\nتم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.\nتم إنشاء التقرير: {os.path.basename(excel_path)}")
+
+    def on_error(self, err):
+        self.btn_run.setEnabled(True)
+        QMessageBox.critical(self, "خطأ", f"فشل المعالجة:\n{err}")
+        self.lbl_status.setText("حدث خطأ أثناء المعالجة.")
+
+    def open_excel(self):
+        if self.last_generated_excel and os.path.exists(self.last_generated_excel):
+            try:
+                os.startfile(self.last_generated_excel)
+            except Exception as e:
+                QMessageBox.warning(self, "خطأ", f"تعذر فتح الملف:\n{e}")
+        else:
+            QMessageBox.information(self, "تنبيه", "قم بتشغيل استخراج البيانات أولاً ليتم إنشاء التقرير.")
 
     def setup_system_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
@@ -186,7 +320,8 @@ class A2RConsole(QMainWindow):
     def open_records_viewer(self):
         try:
             from records_viewer import RecordsViewerWindow
-            self.rv = RecordsViewerWindow(self)
+            # نمرر السجلات الحقيقية التي تم معالجتها بدلاً من السجلات الوهمية!
+            self.rv = RecordsViewerWindow(self, records=self.last_detailed_records)
             self.rv.exec()
         except ImportError as e:
             QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة السجلات:\n{e}")
@@ -194,6 +329,7 @@ class A2RConsole(QMainWindow):
     def open_cash_window(self):
         try:
             from cash_window import CashWindow
+            # نمرر إجمالي السيستم الحقيقي!
             self.cash_win = CashWindow(self, system_total=self.system_total_sum)
             self.cash_win.exec()
         except ImportError as e:
