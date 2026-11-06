@@ -11,7 +11,6 @@ def init_db():
     try:
         conn = sqlite3.connect(DB_FILE)
         c = conn.cursor()
-        # جدول المعاملات اليدوية
         c.execute('''
             CREATE TABLE IF NOT EXISTS manual_tx (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -23,7 +22,6 @@ def init_db():
                 file_name TEXT
             )
         ''')
-        # جدول الإلغاءات
         c.execute('''
             CREATE TABLE IF NOT EXISTS voids (
                 file_key TEXT PRIMARY KEY,
@@ -34,28 +32,28 @@ def init_db():
                 voided_by TEXT
             )
         ''')
-        # جدول إعدادات النظام
         c.execute('''
             CREATE TABLE IF NOT EXISTS system_meta (
                 meta_key TEXT PRIMARY KEY,
                 meta_value TEXT
             )
         ''')
-        
-        # جدول فهرس الأرشيف
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS archive_index (
-                path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
-                insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
-                is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER
-            )
-        ''')
-        c.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
-        
         conn.commit()
         conn.close()
     except Exception as e:
         print(f"DB Init Error: {e}")
+
+def add_manual_tx(unit, plate, insured, amount, file_name):
+    conn = sqlite3.connect(DB_FILE)
+    try:
+        created_at = datetime.datetime.now().strftime("%d-%m-%Y %H%M%S")
+        conn.execute('''
+            INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name)
+            VALUES (?, ?, ?, ?, ?, ?)
+        ''', (unit, plate, insured, float(amount), created_at, file_name))
+        conn.commit()
+    finally:
+        conn.close()
 
 def add_void(file_key, amount, plate, reason, username="-"):
     at = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S")
@@ -66,45 +64,3 @@ def add_void(file_key, amount, plate, reason, username="-"):
         conn.commit()
     finally:
         conn.close()
-
-def remove_void(file_key):
-    conn = sqlite3.connect(DB_FILE)
-    try:
-        conn.execute("DELETE FROM voids WHERE file_key = ?", (file_key,))
-        conn.commit()
-    finally:
-        conn.close()
-
-def load_void_map():
-    mp = {}
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT file_key, reason, voided_at, voided_by FROM voids")
-        for k, r, at, by in c.fetchall():
-            mp[k] = {"reason": r or "", "at": at or "", "by": by or ""}
-        conn.close()
-    except Exception as e:
-        print(f"Load Void Map Error: {e}")
-    return mp
-
-def save_meta(key, value):
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES (?, ?)", (key, value))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"Save Meta Error: {e}")
-
-def get_meta(key):
-    try:
-        conn = sqlite3.connect(DB_FILE)
-        c = conn.cursor()
-        c.execute("SELECT meta_value FROM system_meta WHERE meta_key = ?", (key,))
-        row = c.fetchone()
-        conn.close()
-        return row[0] if row else None
-    except Exception as e:
-        print(f"Get Meta Error: {e}")
-        return None
