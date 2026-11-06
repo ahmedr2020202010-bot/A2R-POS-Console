@@ -1,14 +1,12 @@
 import sys
 import os
-import datetime
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QPushButton, QLabel, QLineEdit, QComboBox, QTableWidget, 
-    QTableWidgetItem, QProgressBar, QMessageBox, QSystemTrayIcon,
-    QMenu, QStackedWidget, QDialog, QFrame, QGridLayout
+    QPushButton, QLabel, QLineEdit, QProgressBar, QMessageBox, 
+    QSystemTrayIcon, QMenu, QStackedWidget, QFrame
 )
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QIcon, QAction, QFont
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction
 
 APP_VERSION = "v51"
 APP_OWNER = "Ahmed Ramadan"
@@ -31,7 +29,6 @@ class A2RConsole(QMainWindow):
         self.setup_full_view()
         self.setup_system_tray()
         
-        # Start in Mini Mode
         self.switch_to_mini()
 
     def setup_mini_view(self):
@@ -78,7 +75,6 @@ class A2RConsole(QMainWindow):
         card.setStyleSheet("background-color: #121E2E; border: 1px solid #1E2E42; border-radius: 8px;")
         card_layout = QVBoxLayout(card)
         
-        # Path input
         path_layout = QHBoxLayout()
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("مسار مجلد الإيصالات...")
@@ -90,7 +86,6 @@ class A2RConsole(QMainWindow):
         path_layout.addWidget(btn_browse)
         card_layout.addLayout(path_layout)
         
-        # Action Buttons
         self.btn_run = QPushButton("⚡ بدء استخراج ومعالجة البيانات")
         self.btn_run.setStyleSheet("background-color: #10B981; color: white; font-weight: bold; padding: 10px; border-radius: 4px;")
         card_layout.addWidget(self.btn_run)
@@ -103,32 +98,31 @@ class A2RConsole(QMainWindow):
         layout.addWidget(card)
         layout.addStretch()
         
-        # Tools Bar (POS Closing, Excel, etc)
+        # Tools Bar
         tools_layout = QHBoxLayout()
         
-        btn_pos_close = QPushButton("🧾 تقفيل POS")
-        btn_pos_close.setStyleSheet("background-color: #0F766E; color: white; padding: 6px;")
-        tools_layout.addWidget(btn_pos_close)
+        self.btn_pos_close = QPushButton("🧾 تقفيل POS")
+        self.btn_pos_close.setStyleSheet("background-color: #0F766E; color: white; padding: 6px;")
+        self.btn_pos_close.clicked.connect(self.open_closing_window)
+        tools_layout.addWidget(self.btn_pos_close)
         
-        btn_pos_pay = QPushButton("💳 إيصالات الدفع")
-        btn_pos_pay.setStyleSheet("background-color: #B45309; color: white; padding: 6px;")
-        tools_layout.addWidget(btn_pos_pay)
+        self.btn_pos_pay = QPushButton("💳 إيصالات الدفع")
+        self.btn_pos_pay.setStyleSheet("background-color: #B45309; color: white; padding: 6px;")
+        self.btn_pos_pay.clicked.connect(self.open_payments_window)
+        tools_layout.addWidget(self.btn_pos_pay)
         
         layout.addLayout(tools_layout)
         self.stacked_widget.addWidget(self.full_widget)
 
     def setup_system_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        
         tray_menu = QMenu()
         restore_action = QAction("فتح البرنامج", self)
         restore_action.triggered.connect(self.showNormal)
         tray_menu.addAction(restore_action)
-        
         quit_action = QAction("إغلاق البرنامج نهائياً", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         tray_menu.addAction(quit_action)
-        
         self.tray_icon.setContextMenu(tray_menu)
         self.tray_icon.show()
 
@@ -145,10 +139,25 @@ class A2RConsole(QMainWindow):
         self.hide()
         self.tray_icon.showMessage("A2R Console", "البرنامج يعمل في الخلفية", QSystemTrayIcon.Information, 2000)
 
+    # --- Windows Openers ---
+    def open_closing_window(self):
+        try:
+            from closing_window import ClosingWindow
+            self.cw = ClosingWindow(self)
+            self.cw.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة التقفيل:\n{e}")
+
+    def open_payments_window(self):
+        try:
+            from payments_window import PaymentsWindow
+            self.pw = PaymentsWindow(self)
+            self.pw.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة إيصالات الدفع:\n{e}")
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    
-    # Global Dark Theme (Fusion Base)
     app.setStyle("Fusion")
     qss = """
     QMainWindow { background-color: #080E17; }
@@ -156,9 +165,9 @@ if __name__ == '__main__':
     QMenu { background-color: #121E2E; color: white; border: 1px solid #1E2E42; }
     QMenu::item:selected { background-color: #0284C7; }
     QMessageBox { background-color: #121E2E; }
+    QDialog { background-color: #080E17; }
     """
     app.setStyleSheet(qss)
-    
     window = A2RConsole()
     window.show()
     sys.exit(app.exec())
