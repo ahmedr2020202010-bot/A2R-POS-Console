@@ -123,6 +123,11 @@ class A2RConsole(QMainWindow):
         # Tools Bar
         tools_layout = QHBoxLayout()
         
+        self.btn_archive = QPushButton("📚 سجل الأرشيف")
+        self.btn_archive.setStyleSheet("background-color: #7C3AED; color: white; padding: 6px;")
+        self.btn_archive.clicked.connect(self.open_archive_history)
+        tools_layout.addWidget(self.btn_archive)
+        
         self.btn_pos_close = QPushButton("🧾 تقفيل POS")
         self.btn_pos_close.setStyleSheet("background-color: #0F766E; color: white; padding: 6px;")
         self.btn_pos_close.clicked.connect(self.open_closing_window)
@@ -201,6 +206,14 @@ class A2RConsole(QMainWindow):
             self.man_win.exec()
         except ImportError as e:
             QMessageBox.warning(self, "خطأ", f"تعذر فتح الإضافة اليدوية:\n{e}")
+            
+    def open_archive_history(self):
+        try:
+            from archive_history import ArchiveHistoryWindow
+            self.arch_win = ArchiveHistoryWindow(self)
+            self.arch_win.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح سجل الأرشيف:\n{e}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
