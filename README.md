@@ -11,10 +11,15 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+لتجربة نافذة التقفيل بشكل منفصل:
+```bash
+python closing_window.py
+```
 
 ## هيكل المشروع (Project Structure)
 - `main.py`: النافذة الرئيسية (وضع الميني والوضع الكامل) باستخدام PySide6.
-- `pos_engine.py`: محرك معالجة الإيصالات والـ OCR (تم فصله كملف مستقل لتنظيم الكود).
+- `closing_window.py`: نافذة التقفيل (POS Closing) مع دعم التشغيل في الخلفية (QThread).
+- `pos_engine.py`: محرك معالجة الإيصالات والـ OCR (يتم استدعاؤه من النوافذ).
 - `requirements.txt`: المكتبات المطلوبة.
 
 تم إعداد هذا المشروع ليكون جاهزاً للرفع على GitHub.
