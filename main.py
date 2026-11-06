@@ -76,7 +76,7 @@ class A2RConsole(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"A2R Operations Console - {APP_OWNER}")
-        self.setMinimumSize(440, 240) # Slightly taller for the new button
+        self.setMinimumSize(440, 240)
         db.init_db()
 
         self.last_detailed_records = []
@@ -121,7 +121,6 @@ class A2RConsole(QMainWindow):
         self.lbl_print_count.setStyleSheet("color: #94A3B8; font-weight: bold;")
         layout.addWidget(self.lbl_print_count, alignment=Qt.AlignCenter)
         
-        # --- NEW: Archive Button in Mini View ---
         self.btn_mini_archive = QPushButton("📦 أرشفة التنزيلات")
         self.btn_mini_archive.setStyleSheet("background-color: #4338CA; color: white; padding: 6px; font-weight: bold; margin-top: 10px;")
         self.btn_mini_archive.clicked.connect(self.open_archiver_window)
@@ -213,7 +212,6 @@ class A2RConsole(QMainWindow):
         
         self.tools_layout = QHBoxLayout()
         
-        # Archiver Button added to Full View as well
         self.btn_archiver = QPushButton("📦 أرشفة التنزيلات")
         self.btn_archiver.setStyleSheet("background-color: #4338CA; color: white; padding: 6px;")
         self.btn_archiver.clicked.connect(self.open_archiver_window)
@@ -292,8 +290,14 @@ class A2RConsole(QMainWindow):
         self.last_detailed_records = records
         self.system_total_sum = total_sum
         self.last_generated_excel = excel_path
+        
+        # FIXED: Removed multi-line f-string that caused SyntaxError in PyInstaller
+        msg = (f"تمت المعالجة بنجاح!\n"
+               f"تم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.\n"
+               f"تم إنشاء التقرير: {os.path.basename(excel_path)}")
+               
         self.lbl_status.setText(f"✓ اكتملت المعالجة: {len(records)} إيصال | الإجمالي: {total_sum:,.2f} ج.م")
-        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!\nتم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.\nتم إنشاء التقرير: {os.path.basename(excel_path)}")
+        QMessageBox.information(self, "تم", msg)
 
     def on_error(self, err):
         self.btn_run.setEnabled(True)
@@ -317,7 +321,7 @@ class A2RConsole(QMainWindow):
 
     def switch_to_mini(self):
         self.stacked_widget.setCurrentWidget(self.mini_widget)
-        self.setFixedSize(440, 240) # Taller for archive button
+        self.setFixedSize(440, 240)
 
     def switch_to_full(self):
         self.stacked_widget.setCurrentWidget(self.full_widget)
