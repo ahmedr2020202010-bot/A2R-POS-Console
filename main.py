@@ -96,6 +96,15 @@ class A2RConsole(QMainWindow):
         card_layout.addWidget(self.progress_bar)
         
         layout.addWidget(card)
+        
+        # Middle Bar (View Records)
+        mid_layout = QHBoxLayout()
+        btn_view_rec = QPushButton("🔍 عرض السجلات والمطابقة")
+        btn_view_rec.setStyleSheet("background-color: #0284C7; color: white; padding: 8px; font-weight: bold;")
+        btn_view_rec.clicked.connect(self.open_records_viewer)
+        mid_layout.addWidget(btn_view_rec)
+        layout.addLayout(mid_layout)
+        
         layout.addStretch()
         
         # Tools Bar
@@ -155,6 +164,14 @@ class A2RConsole(QMainWindow):
             self.pw.exec()
         except ImportError as e:
             QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة إيصالات الدفع:\n{e}")
+            
+    def open_records_viewer(self):
+        try:
+            from records_viewer import RecordsViewerWindow
+            self.rv = RecordsViewerWindow(self)
+            self.rv.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة السجلات:\n{e}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
