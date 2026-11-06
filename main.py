@@ -17,6 +17,8 @@ class A2RConsole(QMainWindow):
         self.setWindowTitle(f"A2R Operations Console - {APP_OWNER}")
         self.setMinimumSize(440, 210)
         
+        self.system_total_sum = 2500.50 # Dummy system total for testing
+        
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
         self.main_layout = QVBoxLayout(self.central_widget)
@@ -97,12 +99,23 @@ class A2RConsole(QMainWindow):
         
         layout.addWidget(card)
         
-        # Middle Bar (View Records)
+        # Middle Bar (View Records & Daily Tools)
         mid_layout = QHBoxLayout()
         btn_view_rec = QPushButton("🔍 عرض السجلات والمطابقة")
         btn_view_rec.setStyleSheet("background-color: #0284C7; color: white; padding: 8px; font-weight: bold;")
         btn_view_rec.clicked.connect(self.open_records_viewer)
         mid_layout.addWidget(btn_view_rec)
+
+        btn_manual = QPushButton("➕ إضافة يدوي")
+        btn_manual.setStyleSheet("background-color: #0F766E; color: white; padding: 8px;")
+        btn_manual.clicked.connect(self.open_manual_window)
+        mid_layout.addWidget(btn_manual)
+
+        btn_cash = QPushButton("💵 حاسبة الكاش")
+        btn_cash.setStyleSheet("background-color: #0D9488; color: white; padding: 8px;")
+        btn_cash.clicked.connect(self.open_cash_window)
+        mid_layout.addWidget(btn_cash)
+
         layout.addLayout(mid_layout)
         
         layout.addStretch()
@@ -172,6 +185,22 @@ class A2RConsole(QMainWindow):
             self.rv.exec()
         except ImportError as e:
             QMessageBox.warning(self, "خطأ", f"تعذر فتح نافذة السجلات:\n{e}")
+
+    def open_cash_window(self):
+        try:
+            from cash_window import CashWindow
+            self.cash_win = CashWindow(self, system_total=self.system_total_sum)
+            self.cash_win.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح حاسبة الكاش:\n{e}")
+
+    def open_manual_window(self):
+        try:
+            from manual_window import ManualReceiptWindow
+            self.man_win = ManualReceiptWindow(self)
+            self.man_win.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح الإضافة اليدوية:\n{e}")
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
