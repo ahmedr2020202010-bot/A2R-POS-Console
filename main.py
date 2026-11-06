@@ -76,7 +76,7 @@ class A2RConsole(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"A2R Operations Console - {APP_OWNER}")
-        self.setMinimumSize(440, 210)
+        self.setMinimumSize(440, 240) # Slightly taller for the new button
         db.init_db()
 
         self.last_detailed_records = []
@@ -121,8 +121,14 @@ class A2RConsole(QMainWindow):
         self.lbl_print_count.setStyleSheet("color: #94A3B8; font-weight: bold;")
         layout.addWidget(self.lbl_print_count, alignment=Qt.AlignCenter)
         
+        # --- NEW: Archive Button in Mini View ---
+        self.btn_mini_archive = QPushButton("📦 أرشفة التنزيلات")
+        self.btn_mini_archive.setStyleSheet("background-color: #4338CA; color: white; padding: 6px; font-weight: bold; margin-top: 10px;")
+        self.btn_mini_archive.clicked.connect(self.open_archiver_window)
+        layout.addWidget(self.btn_mini_archive)
+        
         self.btn_full_console = QPushButton("🖥️ النسخة الكاملة")
-        self.btn_full_console.setStyleSheet("background-color: #DC2626; margin-top: 10px;")
+        self.btn_full_console.setStyleSheet("background-color: #DC2626; color: white; padding: 8px; font-weight: bold; margin-top: 5px;")
         self.btn_full_console.clicked.connect(self.request_full_console)
         layout.addWidget(self.btn_full_console)
         
@@ -153,7 +159,8 @@ class A2RConsole(QMainWindow):
         
         path_layout = QHBoxLayout()
         self.path_input = QLineEdit()
-        self.path_input.setText(os.path.join(os.path.expanduser("~"), "Downloads"))
+        default_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        self.path_input.setText(default_dir)
         path_layout.addWidget(self.path_input)
         
         btn_browse = QPushButton("تحديد")
@@ -205,6 +212,13 @@ class A2RConsole(QMainWindow):
         layout.addStretch()
         
         self.tools_layout = QHBoxLayout()
+        
+        # Archiver Button added to Full View as well
+        self.btn_archiver = QPushButton("📦 أرشفة التنزيلات")
+        self.btn_archiver.setStyleSheet("background-color: #4338CA; color: white; padding: 6px;")
+        self.btn_archiver.clicked.connect(self.open_archiver_window)
+        self.tools_layout.addWidget(self.btn_archiver)
+        
         self.btn_archive = QPushButton("📚 سجل الأرشيف")
         self.btn_archive.setStyleSheet("background-color: #7C3AED;")
         self.btn_archive.clicked.connect(self.open_archive_history)
@@ -228,7 +242,6 @@ class A2RConsole(QMainWindow):
         if auth.exec():
             self.is_supervisor = auth.is_supervisor
             
-            # Show/Hide Admin features
             if self.is_supervisor:
                 self.lbl_role.setText("● ADMIN")
                 self.lbl_role.setStyleSheet("color: #EF4444; font-weight: bold; border: 1px solid #EF4444; padding: 4px; border-radius: 4px;")
@@ -304,11 +317,11 @@ class A2RConsole(QMainWindow):
 
     def switch_to_mini(self):
         self.stacked_widget.setCurrentWidget(self.mini_widget)
-        self.setFixedSize(440, 210)
+        self.setFixedSize(440, 240) # Taller for archive button
 
     def switch_to_full(self):
         self.stacked_widget.setCurrentWidget(self.full_widget)
-        self.setFixedSize(700, 500)
+        self.setFixedSize(720, 520)
 
     def closeEvent(self, event):
         event.ignore()
@@ -316,6 +329,14 @@ class A2RConsole(QMainWindow):
         self.tray_icon.showMessage("A2R Console", "البرنامج يعمل في الخلفية", QSystemTrayIcon.Information, 2000)
 
     # --- Windows Openers ---
+    def open_archiver_window(self):
+        try:
+            from archiver_window import ArchiverWindow
+            self.archiver_win = ArchiverWindow(self)
+            self.archiver_win.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", f"تعذر فتح أداة الأرشفة:\n{e}")
+
     def open_closing_window(self):
         from closing_window import ClosingWindow
         self.cw = ClosingWindow(self)
