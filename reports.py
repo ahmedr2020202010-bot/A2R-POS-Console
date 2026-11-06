@@ -23,14 +23,7 @@ def _ar(text):
     except:
         return str(text)
 
-def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val):
-    if not REPORTLAB_AVAILABLE:
-        raise RuntimeError("ReportLab is not installed.")
-        
-    op_dt = datetime.datetime.now()
-    PAGE_W, PAGE_H = 160, 240
-    c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
-    
+def _register_arabic_font():
     font_name = "Helvetica-Bold"
     for f_cand in [r"C:\Windows\Fontsrial.ttf", r"C:\Windows\Fonts	ahoma.ttf"]:
         if os.path.exists(f_cand):
@@ -39,6 +32,16 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val):
                 font_name = "ReceiptArabic"
                 break
             except: pass
+    return font_name
+
+def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed.")
+        
+    op_dt = datetime.datetime.now()
+    PAGE_W, PAGE_H = 160, 240
+    c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
+    font_name = _register_arabic_font()
 
     c.setStrokeColorRGB(0, 0, 0)
     c.setLineWidth(1.2)
@@ -85,11 +88,37 @@ def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val):
     c.drawCentredString(PAGE_W / 2, box_y + 20, _ar("المبلغ المحصل:"))
     c.setFont("Helvetica-Bold", 14)
     c.drawCentredString(PAGE_W / 2, box_y + 6, f"{amt_val:,.2f} EGP")
+    c.save()
 
+def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
+    if not REPORTLAB_AVAILABLE:
+        raise RuntimeError("ReportLab is not installed.")
+        
+    PAGE_W, PAGE_H = 160, 95
+    c = canvas.Canvas(filepath, pagesize=(PAGE_W, PAGE_H))
+    font_name = _register_arabic_font()
+
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont(font_name, 17)
+    y = PAGE_H - 20
+    c.drawCentredString(PAGE_W / 2, y, _ar(emp_name))
+    
+    if unit_name:
+        y -= 20
+        c.setFont(font_name, 14)
+        c.drawCentredString(PAGE_W / 2, y, _ar(unit_name))
+        
+    if terminal_id:
+        y -= 17
+        c.setFont("Helvetica-Bold", 12)
+        c.drawCentredString(PAGE_W / 2, y, f"TID: {terminal_id}")
+        
+    y -= 19
+    c.setFont("Helvetica-Bold", 13)
+    c.drawCentredString(PAGE_W / 2, y, date_str)
     c.save()
 
 def write_excel_report(records, out_file):
-    # نسخة مصغرة من دالة الإكسيل في الكود الأصلي
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Detailed Report"

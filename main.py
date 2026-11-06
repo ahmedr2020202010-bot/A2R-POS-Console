@@ -17,7 +17,6 @@ import theme
 APP_VERSION = "v51"
 APP_OWNER = "Ahmed Ramadan"
 
-# ... (MainProcessingWorker remains the same)
 class MainProcessingWorker(QThread):
     progress_update = Signal(int, int, str)
     finished_processing = Signal(list, float, str)
@@ -170,6 +169,12 @@ class A2RConsole(QMainWindow):
         btn_open_excel.setStyleSheet("background-color: #059669;")
         btn_open_excel.clicked.connect(self.open_excel)
         mid_layout.addWidget(btn_open_excel)
+        
+        # --- NEW BUTTON: Print Photocopy Slip ---
+        btn_print_slip = QPushButton("🖨️ إيصال تصوير")
+        btn_print_slip.setStyleSheet("background-color: #D97706;")
+        btn_print_slip.clicked.connect(self.open_print_slip_window)
+        mid_layout.addWidget(btn_print_slip)
 
         btn_manual = QPushButton("➕ إضافة يدوي")
         btn_manual.setStyleSheet("background-color: #0F766E;")
@@ -234,11 +239,14 @@ class A2RConsole(QMainWindow):
         self.system_total_sum = total_sum
         self.last_generated_excel = excel_path
         self.lbl_status.setText(f"✓ اكتملت المعالجة: {len(records)} إيصال | الإجمالي: {total_sum:,.2f} ج.م")
-        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!\nتم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.\nتم إنشاء التقرير: {os.path.basename(excel_path)}")
+        QMessageBox.information(self, "تم", f"تمت المعالجة بنجاح!
+تم استخراج {len(records)} إيصال بإجمالي {total_sum:,.2f} ج.م.
+تم إنشاء التقرير: {os.path.basename(excel_path)}")
 
     def on_error(self, err):
         self.btn_run.setEnabled(True)
-        QMessageBox.critical(self, "خطأ", f"فشل المعالجة:\n{err}")
+        QMessageBox.critical(self, "خطأ", f"فشل المعالجة:
+{err}")
 
     def open_excel(self):
         if self.last_generated_excel and os.path.exists(self.last_generated_excel):
@@ -309,6 +317,14 @@ class A2RConsole(QMainWindow):
             self.man_win.exec()
         except ImportError as e:
             QMessageBox.warning(self, "خطأ", str(e))
+
+    def open_print_slip_window(self):
+        try:
+            from print_slip_window import PrintSlipWindow
+            self.slip_win = PrintSlipWindow(self)
+            self.slip_win.exec()
+        except ImportError as e:
+            QMessageBox.warning(self, "خطأ", str(e))
             
     def open_archive_history(self):
         try:
@@ -321,7 +337,7 @@ class A2RConsole(QMainWindow):
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
-    app.setStyleSheet(theme.GLOBAL_QSS) # Applying our new global theme
+    app.setStyleSheet(theme.GLOBAL_QSS) 
     window = A2RConsole()
     window.show()
     sys.exit(app.exec())
