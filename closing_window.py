@@ -1,171 +1,186 @@
 import os
+import datetime
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, 
-    QLineEdit, QTableWidget, QTableWidgetItem, QProgressBar, 
-    QMessageBox, QFileDialog, QHeaderView, QTextEdit
+    QLineEdit, QTableWidget, QTableWidgetItem, QHeaderView, QMessageBox
 )
-from PySide6.QtCore import Qt, QThread, Signal
-import pos_engine as E 
+from PySide6.QtCore import Qt
 
-class ClosingWorker(QThread):
-    progress_update = Signal(int, int, str)
-    finished_scan = Signal(list, list, list)
-    error_occurred = Signal(str)
-
-    def __init__(self, sources):
-        super().__init__()
-        self.sources = sources
-        self.is_running = True
-
-    def run(self):
-        try:
-            total_files = len(self.sources)
-            items = []
-            warnings = []
-            
-            for i, file_path in enumerate(self.sources):
-                if not self.is_running:
-                    break
-                
-                self.progress_update.emit(i + 1, total_files, f"جاري قراءة: {os.path.basename(file_path)}")
-                
-                # ------ هنا نستخدم المحرك الفعلي ------
-                try:
-                    result = E.mock_closing_scan(file_path)
-                    items.append(result)
-                    if not result["tid"]:
-                        warnings.append(f"الملف {os.path.basename(file_path)}: لم يتم التعرف على الماكينة.")
-                except Exception as ex:
-                    warnings.append(f"الملف {os.path.basename(file_path)}: فشلت القراءة ({str(ex)})")
-                # --------------------------------------
-                
-            self.finished_scan.emit(items, warnings, [])
-        except Exception as e:
-            self.error_occurred.emit(str(e))
-
-    def stop(self):
-        self.is_running = False
+import database as db
+import reports as rep
 
 class ClosingWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("A2R - التقفيل")
-        self.resize(850, 600)
-        self.setStyleSheet("background-color: #080E17; color: white;")
+        self.setWindowTitle("🧾 تقفيل أجهزة الدفع (POS Closing)")
+        self.resize(750, 450)
         
-        self.sources = []
         layout = QVBoxLayout(self)
         
-        # UI Setup
-        source_layout = QHBoxLayout()
-        self.lbl_source = QLabel("لم يتم اختيار مصدر بعد")
-        source_layout.addWidget(self.lbl_source)
+        title = QLabel("🧾 تقفيل وردية وإصدار تقرير POS")
+        title.setStyleSheet("font-size: 16px; font-weight: bold; color: #38BDF8;")
+        title.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title)
         
-        btn_folder = QPushButton("📁 اختيار مجلد")
-        btn_folder.clicked.connect(self.pick_folder)
-        source_layout.addWidget(btn_folder)
-
-        btn_files = QPushButton("🗂️ اختيار ملفات")
-        btn_files.clicked.connect(self.pick_files)
-        source_layout.addWidget(btn_files)
-        layout.addLayout(source_layout)
-
-        ctrl_layout = QHBoxLayout()
-        self.btn_start = QPushButton("▶ بدء القراءة")
-        self.btn_start.setStyleSheet("background-color: #16A34A; padding: 8px; font-weight: bold;")
-        self.btn_start.clicked.connect(self.start_processing)
-        ctrl_layout.addWidget(self.btn_start)
-
-        self.btn_stop = QPushButton("⏹ إيقاف")
-        self.btn_stop.setStyleSheet("background-color: #DC2626; padding: 8px; font-weight: bold;")
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self.stop_processing)
-        ctrl_layout.addWidget(self.btn_stop)
-        layout.addLayout(ctrl_layout)
-
-        self.progress_bar = QProgressBar()
-        layout.addWidget(self.progress_bar)
-
-        self.lbl_status = QLabel("")
-        layout.addWidget(self.lbl_status)
-
-        self.table = QTableWidget(0, 7)
-        self.table.setHorizontalHeaderLabels(["م", "الوحدة", "TID", "المبلغ", "التاريخ", "الحالة", "الملف"])
+        info_label = QLabel("قم بإدخال تفاصيل مبيعات أجهزة الفيزا لمطابقتها مع السيستم:")
+        info_label.setStyleSheet("color: #10B981; font-weight: bold;")
+        layout.addWidget(info_label)
+        
+        # --- Form Area ---
+        form_layout = QHBoxLayout()
+        
+        self.e_tid = QLineEdit()
+        self.e_tid.setPlaceholderText("رقم الماكينة (TID)*")
+        form_layout.addWidget(self.e_tid)
+        
+        self.e_amt = QLineEdit()
+        self.e_amt.setPlaceholderText("مبلغ التقفيل (EGP)*")
+        form_layout.addWidget(self.e_amt)
+        
+        self.e_count = QLineEdit()
+        self.e_count.setPlaceholderText("عدد العمليات*")
+        form_layout.addWidget(self.e_count)
+        
+        self.e_unit = QLineEdit()
+        self.e_unit.setPlaceholderText("وحدة المرور")
+        form_layout.addWidget(self.e_unit)
+        
+        btn_add = QPushButton("➕ إضافة للقائمة")
+        btn_add.setStyleSheet("background-color: #0284C7; font-weight: bold; padding: 6px;")
+        btn_add.clicked.connect(self.add_pos_record)
+        form_layout.addWidget(btn_add)
+        
+        layout.addLayout(form_layout)
+        
+        # --- Table Area ---
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["الوحدة", "TID", "المبلغ", "العمليات", "الوقت"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         layout.addWidget(self.table)
         
-        self.txt_notes = QTextEdit()
-        self.txt_notes.setReadOnly(True)
-        self.txt_notes.setFixedHeight(80)
-        layout.addWidget(self.txt_notes)
+        # --- Bottom Area ---
+        bottom_layout = QHBoxLayout()
+        
+        self.lbl_total = QLabel("إجمالي التقفيل: 0.00 ج.م")
+        self.lbl_total.setStyleSheet("font-size: 14px; font-weight: bold; color: #F59E0B;")
+        bottom_layout.addWidget(self.lbl_total)
+        
+        bottom_layout.addStretch()
+        
+        btn_clear = QPushButton("🗑️ مسح القائمة")
+        btn_clear.setStyleSheet("background-color: #DC2626;")
+        btn_clear.clicked.connect(self.clear_table)
+        bottom_layout.addWidget(btn_clear)
+        
+        btn_save = QPushButton("💾 حفظ وإصدار التقرير")
+        btn_save.setStyleSheet("background-color: #10B981; font-weight: bold; padding: 10px 20px;")
+        btn_save.clicked.connect(self.save_and_export)
+        bottom_layout.addWidget(btn_save)
+        
+        layout.addLayout(bottom_layout)
+        
+        self.total_sum = 0.0
 
-    def pick_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "اختار المجلد")
-        if d: 
-            # جلب كل الصور والملفات من المجلد
-            valid_exts = ('.jpg', '.png', '.jpeg', '.pdf')
-            files = []
-            for root, dirs, f_names in os.walk(d):
-                for f in f_names:
-                    if f.lower().endswith(valid_exts):
-                        files.append(os.path.join(root, f))
-            self.sources = files
-            self.lbl_source.setText(f"مجلد: {d} ({len(files)} ملف)")
+    def add_pos_record(self):
+        tid = self.e_tid.text().strip()
+        amt_str = self.e_amt.text().strip()
+        count_str = self.e_count.text().strip()
+        unit = self.e_unit.text().strip() or "غير محدد"
+        
+        if not tid or not amt_str or not count_str:
+            QMessageBox.warning(self, "خطأ", "برجاء إدخال رقم الماكينة، المبلغ، وعدد العمليات!")
+            return
+            
+        try:
+            amt = float(amt_str)
+            count = int(count_str)
+        except ValueError:
+            QMessageBox.warning(self, "خطأ", "تأكد من كتابة الأرقام بشكل صحيح!")
+            return
+            
+        t_time = datetime.datetime.now().strftime("%H:%M:%S")
+        
+        row_pos = self.table.rowCount()
+        self.table.insertRow(row_pos)
+        
+        self.table.setItem(row_pos, 0, QTableWidgetItem(unit))
+        self.table.setItem(row_pos, 1, QTableWidgetItem(tid))
+        self.table.setItem(row_pos, 2, QTableWidgetItem(f"{amt:,.2f}"))
+        self.table.setItem(row_pos, 3, QTableWidgetItem(str(count)))
+        self.table.setItem(row_pos, 4, QTableWidgetItem(t_time))
+        
+        self.total_sum += amt
+        self.lbl_total.setText(f"إجمالي التقفيل: {self.total_sum:,.2f} ج.م")
+        
+        self.e_tid.clear()
+        self.e_amt.clear()
+        self.e_count.clear()
+        self.e_tid.setFocus()
 
-    def pick_files(self):
-        files, _ = QFileDialog.getOpenFileNames(self, "اختار", "", "Images/PDF (*.jpg *.png *.pdf)")
-        if files: 
-            self.sources = files
-            self.lbl_source.setText(f"اخترت {len(files)} ملف")
-
-    def start_processing(self):
-        if not self.sources: return
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+    def clear_table(self):
         self.table.setRowCount(0)
-        
-        self.worker = ClosingWorker(self.sources)
-        self.worker.progress_update.connect(self.update_progress)
-        self.worker.finished_scan.connect(self.on_scan_finished)
-        self.worker.error_occurred.connect(self.on_error)
-        self.worker.start()
+        self.total_sum = 0.0
+        self.lbl_total.setText("إجمالي التقفيل: 0.00 ج.م")
 
-    def stop_processing(self):
-        if self.worker: self.worker.stop()
-
-    def update_progress(self, current, total, text):
-        self.progress_bar.setValue(int((current/total)*100))
-        self.lbl_status.setText(text)
-
-    def on_scan_finished(self, items, warnings, excluded):
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        self.table.setRowCount(len(items))
+    def save_and_export(self):
+        if self.table.rowCount() == 0:
+            QMessageBox.warning(self, "تنبيه", "لا توجد بيانات لحفظها!")
+            return
+            
+        records = []
+        for row in range(self.table.rowCount()):
+            rec = {
+                'unit': self.table.item(row, 0).text(),
+                'tid': self.table.item(row, 1).text(),
+                'amount': self.table.item(row, 2).text(),
+                'count': self.table.item(row, 3).text(),
+                'time': self.table.item(row, 4).text()
+            }
+            records.append(rec)
+            
+        # إنشاء ملف الإكسيل لتقرير التقفيل
+        date_str = datetime.datetime.now().strftime("%d-%m-%Y_%H%M")
+        export_path = os.path.join(db.DOCUMENTS_DIR, f"POS_Closing_{date_str}.xlsx")
         
-        total_amount = 0.0
-        
-        for row, it in enumerate(items):
-            order_str = str(it["order"]) if it["order"] else "-"
-            tid_str = str(it["tid"]) if it["tid"] else "-"
+        try:
+            # استخدام مكتبة openpyxl لإنشاء التقرير
+            import openpyxl
+            from openpyxl.styles import Font, PatternFill, Alignment
             
-            self.table.setItem(row, 0, QTableWidgetItem(order_str))
-            self.table.setItem(row, 1, QTableWidgetItem(it["unit"]))
-            self.table.setItem(row, 2, QTableWidgetItem(tid_str))
-            self.table.setItem(row, 3, QTableWidgetItem(f"{it['amount']:.2f}"))
-            self.table.setItem(row, 4, QTableWidgetItem(it["date"]))
-            self.table.setItem(row, 5, QTableWidgetItem(it["status"]))
-            self.table.setItem(row, 6, QTableWidgetItem(it["file"]))
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = "POS Closing Report"
+            ws.views.sheetView[0].rightToLeft = True
             
-            total_amount += it["amount"]
+            headers = ["م", "الوحدة", "رقم الماكينة (TID)", "المبلغ", "عدد العمليات", "وقت التسجيل"]
             
-        self.lbl_status.setText(f"تم الانتهاء! الإجمالي: {total_amount:.2f} ج.م")
-        
-        if warnings:
-            self.txt_notes.setText("\n".join(warnings))
-        else:
-            self.txt_notes.setText("لا توجد ملاحظات ✓")
+            font_header = Font(name="Arial", size=12, bold=True, color="FFFFFF")
+            fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+            center = Alignment(horizontal="center", vertical="center")
             
-    def on_error(self, err):
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
-        QMessageBox.critical(self, "خطأ", f"حدث خطأ:\n{err}")
+            for col, h in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=h)
+                cell.font, cell.fill, cell.alignment = font_header, fill_header, center
+                
+            for idx, rec in enumerate(records, 1):
+                row_data = [idx, rec['unit'], rec['tid'], float(rec['amount'].replace(',', '')), int(rec['count']), rec['time']]
+                for col, val in enumerate(row_data, 1):
+                    cell = ws.cell(row=idx+1, column=col, value=val)
+                    cell.alignment = center
+                    
+            # إضافة صف الإجمالي
+            last_row = len(records) + 2
+            ws.cell(row=last_row, column=3, value="الإجمالي الكلي:").font = Font(bold=True)
+            ws.cell(row=last_row, column=4, value=self.total_sum).font = Font(bold=True, color="FF0000")
+            
+            for col in range(1, 7):
+                ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 18
+                
+            wb.save(export_path)
+            
+            QMessageBox.information(self, "نجاح", f"تم تقفيل الوردية وإصدار التقرير بنجاح!\nتم الحفظ في:\n{export_path}")
+            os.startfile(export_path)
+            self.accept()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "خطأ", f"حدث خطأ أثناء تصدير التقرير:\n{e}")
