@@ -1,4 +1,4 @@
-name: Build Windows EXE
+name: Build Windows EXE (OneFile)
 
 on:
   push:
@@ -24,12 +24,12 @@ jobs:
         pip install -r requirements.txt
         pip install pyinstaller
 
-    - name: Build with PyInstaller
+    - name: Build with PyInstaller (OneFile)
       run: |
-        pyinstaller --noconfirm --onedir --windowed --name "A2R_Console" --icon "app.ico" --add-data "pdftotext.exe;." --add-data "SumatraPDF.exe;." "main.py"
+        pyinstaller --noconfirm --onefile --windowed --name "A2R_Console" --icon "app.ico" --add-data "pdftotext.exe;." --add-data "SumatraPDF.exe;." "main.py"
 
     - name: Upload EXE
       uses: actions/upload-artifact@v4
       with:
-        name: A2R-Console-App
-        path: dist/A2R_Console/
+        name: A2R-Console-App-Standalone
+        path: dist/A2R_Console.exe
