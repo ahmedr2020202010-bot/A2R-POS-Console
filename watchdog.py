@@ -1,11 +1,18 @@
 import os
+import sys
 import time
 import glob
 import subprocess
 from PySide6.QtCore import QThread, Signal
 
+def get_resource_path(relative_path):
+    """ الحصول على المسار الصحيح للملفات سواء أثناء التطوير أو بعد دمجها داخل الـ EXE """
+    if hasattr(sys, '_MEIPASS'):
+        return os.path.join(sys._MEIPASS, relative_path)
+    return os.path.join(os.path.abspath("."), relative_path)
+
 class AutoPrintWorker(QThread):
-    printed_signal = Signal(str, int)  # filename, total_count today
+    printed_signal = Signal(str, int)
     error_signal = Signal(str)
 
     def __init__(self, watch_dir):
@@ -15,7 +22,6 @@ class AutoPrintWorker(QThread):
         self.printed_count_today = 0
         self.printed_set = set()
         
-        # Populate initially printed set so it doesn't print old files
         if os.path.exists(self.watch_dir):
             for f in glob.glob(os.path.join(self.watch_dir, "*.pdf")):
                 self.printed_set.add(os.path.basename(f))
@@ -33,9 +39,7 @@ class AutoPrintWorker(QThread):
                     if fname in self.printed_set:
                         continue
                         
-                    # Print only quote_receipts or manual receipts
                     if fname.lower().startswith("quote_receipt_") or fname.startswith("_"):
-                        # Ensure file is fully downloaded
                         if os.path.getsize(pdf) > 1000 and not os.path.exists(pdf + ".crdownload"):
                             self.printed_set.add(fname)
                             self.print_pdf(pdf)
@@ -48,10 +52,9 @@ class AutoPrintWorker(QThread):
             time.sleep(2)
 
     def print_pdf(self, pdf_path):
-        # Locate SumatraPDF
-        sumatra = "SumatraPDF.exe"
+        sumatra = get_resource_path("SumatraPDF.exe")
         if not os.path.exists(sumatra):
-            return # Skip if not found
+            return 
             
         cmd = [
             sumatra,
@@ -60,10 +63,9 @@ class AutoPrintWorker(QThread):
             "-silent",
             pdf_path
         ]
-        # Hide window on Windows
         flags = 0
         if os.name == 'nt':
-            flags = 0x08000000 # CREATE_NO_WINDOW
+            flags = 0x08000000 
         subprocess.run(cmd, creationflags=flags)
 
     def stop(self):
