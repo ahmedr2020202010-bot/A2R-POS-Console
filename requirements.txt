@@ -2,5 +2,7 @@ PySide6>=6.5.0
 Pillow
 openpyxl
 reportlab
+arabic-reshaper
+python-bidi
 pypdfium2
 rapidocr-onnxruntime
