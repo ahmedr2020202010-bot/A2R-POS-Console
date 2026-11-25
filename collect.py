@@ -6004,6 +6004,21 @@ class TkCompat:
         return self.configure(**kw)
 
 
+_THEME_KEY_MAP = (("text", "text"), ("text_muted", "muted"), ("success", "ok"), ("danger", "bad"), ("warning", "warn"))
+_FIXED_KEY_MAP = {"#EF4444": "bad", "#DC2626": "bad", "#059669": "ok", "#10B981": "ok", "#F59E0B": "warn", "#D97706": "warn"}
+
+
+def _theme_color_key(color):
+    """اللون اللي الدوال المنقولة بتبعته (t["success"] ...) → مفتاح في PAL، عشان لما الثيم يتغيّر اللون يتغيّر معاه."""
+    c = str(color).upper()
+    for th in ("light", "dark"):
+        T = core.THEMES.get(th) or {}
+        for k, pk in _THEME_KEY_MAP:
+            if str(T.get(k, "")).upper() == c:
+                return pk
+    return _FIXED_KEY_MAP.get(c)
+
+
 class Label(QWidget, TkCompat):
     """Label بأيقونة: لو النص بيبدأ بإيموجي معروف بيتحول لأيقونة SVG بنفس لون النص."""
     def __init__(self, text="", parent=None, size=None, bold=True, color_key="text", wrap=False, align=None,
@@ -6047,8 +6062,13 @@ class Label(QWidget, TkCompat):
             self._icon_name = self._fixed_icon or name
             self.lbl.setText(txt)
         if "text_color" in kw and kw["text_color"]:
-            self._color = kw["text_color"]
-            self._color_key = None
+            key = _theme_color_key(kw["text_color"])
+            if key:   # لون من ألوان الثيم: يفضل ماشي مع الثيم لو اتغيّر
+                self._color_key = key
+                self._color = None
+            else:
+                self._color = kw["text_color"]
+                self._color_key = None
         if "font" in kw and kw["font"]:
             fnt = kw["font"]
             f = self.lbl.font()
@@ -6182,6 +6202,7 @@ class Entry(QLineEdit, TkCompat):
 
     def bind(self, seq, fn, add=None):
         if seq == "<Return>":
+            self._has_return = True
             self.returnPressed.connect(lambda: fn(_Ev(self)))
         elif seq == "<KeyRelease>":
             self.textEdited.connect(lambda _t: fn(_Ev(self)))
@@ -6491,6 +6512,8 @@ class Window(QWidget, TkCompat):
         if seq == "<Escape>":
             self._binds[seq] = fn
             return
+        if seq == "<Return>":
+            self._win_return = True
         keys = {"<Return>": [Qt.Key_Return, Qt.Key_Enter], "<F11>": [Qt.Key_F11],
                 "<Control-f>": [QKeySequence("Ctrl+F")]}
         for k in keys.get(seq, []):
@@ -6582,8 +6605,82 @@ class Window(QWidget, TkCompat):
         self.show()
         self.raise_()
         self.activateWindow()
+        if focus is None:
+            focus = self._first_text_field()
         if focus is not None:
-            QTimer.singleShot(30, focus.setFocus)
+            # الموظف يكتب على طول من غير ما يدوس في الخانة (بنكرر عشان الويندوز أحياناً يتأخر في تفعيل الشباك)
+            for ms in (0, 60, 200):
+                QTimer.singleShot(ms, lambda f=focus: self._give_focus(f))
+
+    def _text_fields(self):
+        out = []
+        for w in self.findChildren(QWidget):
+            le = None
+            if isinstance(w, QLineEdit):
+                le = w
+            if le is None or not le.isVisibleTo(self) or not le.isEnabled() or le.isReadOnly():
+                continue
+            out.append(le)
+        return out
+
+    def _first_text_field(self):
+        try:
+            fields = self._text_fields()
+            if not fields:
+                return None
+            # أول خانة بترتيب التنقل بـ Tab
+            w = self.nextInFocusChain()
+            seen = 0
+            while w is not None and seen < 500:
+                if w in fields:
+                    return w
+                w = w.nextInFocusChain(); seen += 1
+                if w is self:
+                    break
+            return fields[0]
+        except Exception as ex:
+            core._log_silent("first_text_field", ex)
+            return None
+
+    def _give_focus(self, f):
+        try:
+            if self._tk_destroyed or not self.isVisible():
+                return
+            if QApplication.activeWindow() is not self:
+                self.raise_()
+                self.activateWindow()
+            fw = QApplication.focusWidget()
+            if getattr(self, "_focus_given", False) and fw is not None and fw is not f \
+                    and fw.window() is self and fw is not self:
+                return  # الموظف بدأ يتنقل بنفسه
+            self._focus_given = True
+            target = f.lineEdit() if isinstance(f, QComboBox) and f.isEditable() else f
+            f.setFocus(Qt.OtherFocusReason)
+            if isinstance(target, QLineEdit) and target.text() and not getattr(self, "_sel_done", False):
+                target.selectAll()
+                self._sel_done = True
+        except RuntimeError:
+            pass
+        except Exception as ex:
+            core._log_silent("give_focus", ex)
+
+    def keyPressEvent(self, e):
+        # Enter في أي شباك فيه خانة كتابة = زرار الشباك الأساسي (لو الخانة/الشباك مالهمش Enter خاص بيهم)
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter) and not getattr(self, "_win_return", False) \
+                and not getattr(self, "_no_enter_default", False):
+            fw = QApplication.focusWidget()
+            if isinstance(fw, QPushButton) and fw.window() is self and fw.isEnabled():
+                fw.click(); return
+            own = getattr(fw, "_has_return", False)
+            par = fw.parent() if fw is not None else None
+            if isinstance(par, QComboBox) and getattr(par, "_return", None):
+                own = True
+            if not own and self._text_fields():
+                prim = [b for b in self.findChildren(Button)
+                        if b._role in ("primary", "dangerfill") and b.isVisibleTo(self) and b.isEnabled()]
+                if len(prim) == 1:
+                    prim[0].click(); return
+        super().keyPressEvent(e)
 
 
 # ───────────────────────── جدول بنفس واجهة ttk.Treeview ─────────────────────────
@@ -6937,7 +7034,8 @@ def ops_rows_from_records(records):
             kind = "void"
         lab = {"ok": T2("سليم", "OK"), "manual": T2("يدوي", "Manual"), "dup": T2("مكرر", "Duplicate"),
                "void": T2("ملغي", "Void"), "wrong": T2("وحدة مختلفة", "Other unit"),
-               "missing": T2("ناقص", "Incomplete")}.get(kind, r.get("status_text", ""))
+               "missing": T2("ناقص", "Incomplete")}.get(kind, "")
+        lab = str(r.get("status_text") or lab)   # نفس نص الحالة اللي في «عرض السجلات»
         tm = str(r.get("time", "") or "")
         tm = tm[-5:] if len(tm) >= 5 and tm[-3] == ":" else tm
         name = str(r.get("insured", "") or "-")
@@ -6969,8 +7067,12 @@ class OpsDelegate(QStyledItemDelegate):
             pa.fillRect(rect, QColor(p["sel"]))
         elif option.state & QStyle.State_MouseOver:
             pa.fillRect(rect, QColor(p["hover"]))
-        col = {"ok": p["ok"], "manual": p["man"], "dup": p["warn"], "void": p["bad"],
-               "wrong": p["warn"], "missing": p["warn"]}.get(r["kind"], p["muted"])
+        # نفس معنى ألوان الكونسول (سجل العمليات): 🟥 مكرر  🟨 ناقص  🟧 وحدة أخرى  🟪 ملغي
+        dark = ThemeState.key == "dark"
+        col = {"ok": p["ok"], "manual": p["man"], "dup": p["bad"],
+               "void": "#C084FC" if dark else "#9333EA",
+               "wrong": "#FB923C" if dark else "#EA580C",
+               "missing": "#FACC15" if dark else "#CA8A04"}.get(r["kind"], p["muted"])
         rtl = option.direction == Qt.RightToLeft
         stripe_x = rect.right() - 4 if rtl else rect.left() + 1
         pa.setPen(Qt.NoPen)
@@ -7734,7 +7836,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         lw = max(fm.horizontalAdvance(self.lbl_folder.lbl.text()), fm.horizontalAdvance(self.lbl_d.lbl.text())) + 10
         self.lbl_folder.setFixedWidth(lw)
         self.lbl_d.setFixedWidth(lw)
-        self.lbl_ops_title.configure(text=T2("آخر العمليات", "Recent"))
+        self.lbl_ops_title.configure(text=T2("آخر العمليات", "Recent operations"))
         self.btn_ops_link.setText(T2("عرض السجلات ←", "View records →"))
         self._fill_theme_combo()
         self._install_tooltips()
