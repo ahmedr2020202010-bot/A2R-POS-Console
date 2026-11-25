@@ -1,0 +1,9601 @@
+# -*- coding: utf-8 -*-
+# A2R POS Console — منطق البرنامج (مأخوذ حرفيًا من collect.py نسخة v97، من غير واجهة Tk).
+# المصدر: sha256 7a26ec01f2aa98977afdd80bceb76e18e8dbeb787dce16babe13b1fd6f056ded
+# متعدّلش هنا: أي تغيير في القراءة/العد/السمري/الجسر لازم يبقى نفس اللي في الكونسول.
+import os
+import sys
+
+# إجبار نظام ويندوز على إظهار أيقونة البرنامج المخصصة في شريط المهام (Taskbar)
+if sys.platform == "win32":
+    try:
+        import ctypes
+        app_id = "a2r.pos.console"
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(app_id)
+    except Exception:
+        pass
+
+# منع تشغيل أكثر من نسخة بشكل متوافق تماماً مع PyInstaller
+_SINGLE_INSTANCE_MUTEX = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _kernel32 = ctypes.windll.kernel32
+        _user32 = ctypes.windll.user32
+        MUTEX_NAME = "Local\\A2R_Insurance_Console_Mutex_v41_App"
+        _kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR]
+        _kernel32.CreateMutexW.restype = wintypes.HANDLE
+        _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        _user32.FindWindowW.restype = wintypes.HWND
+        _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        _user32.ShowWindow.restype = wintypes.BOOL
+        _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        _user32.SetForegroundWindow.restype = wintypes.BOOL
+        _SINGLE_INSTANCE_MUTEX = _kernel32.CreateMutexW(None, wintypes.BOOL(False), MUTEX_NAME)
+        if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+            hwnd = (_user32.FindWindowW(None, "A2R POS Console - Ahmed Ramadan")
+                    or _user32.FindWindowW(None, "A2R Operations Console - Ahmed Ramadan"))
+            if hwnd:
+                _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                _user32.SetForegroundWindow(hwnd)
+            sys.exit(0)
+    except Exception:
+        pass
+
+import glob
+import re
+import time
+import json
+import shutil
+import sqlite3
+import hashlib
+import hmac
+import secrets
+import subprocess
+import datetime
+import unicodedata
+import threading
+import queue
+import logging
+try:
+    import winsound
+except ImportError:   # مش ويندوز (اختبارات بس)
+    class winsound:
+        MB_ICONHAND = 16
+        @staticmethod
+        def Beep(*a): pass
+        @staticmethod
+        def MessageBeep(*a): pass
+import webbrowser
+import tempfile
+import zlib
+import html
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+ctk = tk = ttk = messagebox = filedialog = simpledialog = None   # A2R POS Console: الواجهة Qt (في نفس الملف تحت)
+
+try:
+    import winreg
+    WINREG_AVAILABLE = True
+except ImportError:
+    WINREG_AVAILABLE = False
+
+PYSTRAY_IMPORT_ERROR = ""
+try:
+    import pystray
+    from PIL import Image, ImageDraw
+    PYSTRAY_AVAILABLE = True
+except Exception as _tray_exc:
+    PYSTRAY_AVAILABLE = False
+    PYSTRAY_IMPORT_ERROR = repr(_tray_exc)
+
+try:
+    from PIL import ImageTk
+except Exception:
+    ImageTk = None
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+    OPENPYXL_AVAILABLE = True
+except ImportError:
+    OPENPYXL_AVAILABLE = False
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    REPORTLAB_AVAILABLE = False
+
+try:
+    from pypdf import PdfReader, PdfWriter
+    PYPDF_AVAILABLE = True
+except ImportError:
+    PYPDF_AVAILABLE = False
+
+APP_VERSION = "v97"
+APP_OWNER = "Ahmed Ramadan"
+
+_SILENT_SEEN = {}
+
+def _log_silent(ctx, e):
+    """بديل `except Exception: pass`: بيسجّل الخطأ في app_log.txt بدل ما يخفيه، من غير ما يغيّر سلوك البرنامج.
+    كل موضع بيتسجّل مرة كل 10 دقايق بس (السجل ميتملاش)، وأخطاء Tcl الخاصة بإغلاق النوافذ بتتجاهل."""
+    try:
+        if type(e).__name__ == "TclError":
+            return
+        if not logging.getLogger().handlers:      # السجل لسه متجهّزش (أثناء الاستيراد): متفعلش basicConfig بالغلط
+            return
+        key = (ctx, type(e).__name__)
+        now = time.time()
+        if now - _SILENT_SEEN.get(key, 0) < 600:
+            return
+        _SILENT_SEEN[key] = now
+        logging.error(f"[silent:{ctx}] {type(e).__name__}: {e}")
+    except Exception:
+        pass
+
+
+
+if getattr(sys, 'frozen', False):
+    BUNDLE_DIR = sys._MEIPASS
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BUNDLE_DIR = os.path.dirname(os.path.abspath(__file__))
+    BASE_DIR = BUNDLE_DIR
+
+PDFTOTEXT_EXE = os.path.join(BUNDLE_DIR, "pdftotext.exe")
+if not os.path.exists(PDFTOTEXT_EXE):
+    PDFTOTEXT_EXE = os.path.join(BASE_DIR, "pdftotext.exe")
+
+def get_app_icon_path():
+    candidates = [
+        os.path.join(BUNDLE_DIR, "app.ico"),
+        os.path.join(BASE_DIR, "app.ico"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.ico") if "__file__" in globals() else ""
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return None
+def set_window_icon_safe(window):
+    ico_path = get_app_icon_path()
+    if not ico_path:
+        return
+
+    def _apply():
+        try:
+            window.iconbitmap(ico_path)
+        except Exception:
+            try:
+                if ImageTk is not None:
+                    img = Image.open(ico_path)
+                    photo = ImageTk.PhotoImage(img)
+                    window._a2r_icon_ref = photo
+                    window.wm_iconphoto(True, photo)
+            except Exception as _e:
+                _log_silent("_apply#1", _e)
+
+    _apply()
+    try:
+        # customtkinter يعيد وضع أيقونته الافتراضية بعد لحظات، فنعيد تطبيق أيقونتنا
+        window.after(300, _apply)
+        window.after(1000, _apply)
+    except Exception as _e:
+        _log_silent("set_window_icon_safe#1", _e)
+def setup_windows_autostart():
+    if not WINREG_AVAILABLE or sys.platform != "win32":
+        return
+    try:
+        exe_path = os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)
+        if not exe_path.lower().endswith(".exe"):
+            return
+        cmd = f'"{exe_path}" --autostart'
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, "A2R_Console", 0, winreg.REG_SZ, cmd)
+        winreg.CloseKey(key)
+    except Exception as _e:
+        _log_silent("setup_windows_autostart#1", _e)
+DEFAULT_RECEIPTS_DIR = os.path.join(os.path.expanduser("~"), "Downloads")
+DOCUMENTS_DIR = os.path.join(os.path.expanduser("~"), "Documents", "A2R_Reports")
+os.makedirs(DOCUMENTS_DIR, exist_ok=True)
+
+APPDATA_DIR = os.path.join(os.getenv("APPDATA", os.path.expanduser("~")), "A2R")
+os.makedirs(APPDATA_DIR, exist_ok=True)
+CONFIG_FILE = os.path.join(APPDATA_DIR, "config.json")
+
+DB_FILE = os.path.join(DOCUMENTS_DIR, "a2r_vault.db")
+LOG_FILE = os.path.join(DOCUMENTS_DIR, "app_log.txt")
+
+ARCHIVE_DIRNAME = "_Receipts_Archive_"
+UNSPEC = "وحدة غير محددة"
+PRINT_TEMP_DIR = os.path.join(tempfile.gettempdir(), "A2R_Print")
+_PRINT_LOCK = threading.Lock()   # طباعة واحدة في الوقت (الملفات المؤقتة بنفس الاسم)
+
+# ── مقاس الطباعة ──────────────────────────────────────────────────────────────
+# بيتحفظ في %APPDATA%\A2R\config.json (فولدر اليوزر نفسه) فمش محتاج صلاحيات أدمن، وكل يوزر له مقاسه.
+# المقاس بيتبعت مع كل طباعة (SumatraPDF) بدل ما نغيّر إعدادات الطابعة في الويندوز (دي اللي كانت محتاجة أدمن).
+DEFAULT_PRINT_PAPER_MM = (57, 90)
+PRINT_PAPER_PRESETS_MM = [(57, 90), (80, 90)]
+_PRINT_PAPER_MM = DEFAULT_PRINT_PAPER_MM
+_PRINT_PAPER_NAME = ""   # اسم الورق زي ما الدرايفر معرّفه (لو اتختار من القايمة)
+
+def _fmt_mm(v):
+    v = float(v)
+    return str(int(v)) if v == int(v) else f"{v:g}"
+
+_CONFIG_LOCK = threading.Lock()
+
+def _read_app_config():
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+def _save_app_prefs(**updates):
+    """يحفظ تفضيلات الجهاز (اللغة، الثيم، الصوت، المزامنة/الطباعة التلقائية) في config.json.
+    مسار الفحص مش بيتحفظ عشان يرجع دايمًا لـ Downloads مع كل تشغيل."""
+    with _CONFIG_LOCK:
+        try:
+            d = _read_app_config()
+            d.update(updates)
+            tmp = CONFIG_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(d, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, CONFIG_FILE)
+            return True
+        except Exception as e:
+            log_exception("save_app_prefs", e)
+            return False
+
+def load_print_paper():
+    global _PRINT_PAPER_MM
+    try:
+        v = _read_app_config().get("print_paper_mm")
+        if not v:
+            return   # لسه مفيش مقاس محفوظ: استخدم الافتراضي من غير ضوضاء في السجل
+        w, h = float(v[0]), float(v[1])
+        if 20 <= w <= 300 and 20 <= h <= 600:
+            _PRINT_PAPER_MM = (w, h)
+            global _PRINT_PAPER_NAME
+            _PRINT_PAPER_NAME = str(_read_app_config().get("print_paper_name") or "")
+    except Exception as _e:
+        _log_silent("load_print_paper#1", _e)
+
+def save_print_paper(w, h, name=""):
+    """بترجّع True لو اتحفظ في الملف. المقاس بيتطبّق فورًا حتى لو الحفظ فشل."""
+    global _PRINT_PAPER_MM, _PRINT_PAPER_NAME
+    _PRINT_PAPER_MM = (float(w), float(h))
+    _PRINT_PAPER_NAME = (name or "").strip()
+    try:
+        d = _read_app_config()
+        d["print_paper_mm"] = [float(w), float(h)]
+        d["print_paper_name"] = _PRINT_PAPER_NAME
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, CONFIG_FILE)
+        return True
+    except Exception as e:
+        log_exception("save_print_paper", e)
+        return False
+
+def print_paper_label():
+    return f"{_fmt_mm(_PRINT_PAPER_MM[0])}x{_fmt_mm(_PRINT_PAPER_MM[1])}"
+
+def print_settings_arg(scaled=True):
+    """إعدادات الطباعة لـ SumatraPDF:
+    نرسل paper= فقط لو في اسم ورق حقيقي من درايفر الطابعة (الأسماء الوهمية بيتجاهلها SumatraPDF).
+    ولو الصفحة اتظبط مقاسها بـ pypdf بنستخدم noscale عشان الدرايفر ميرجعش يصغّرها."""
+    mode = "noscale" if scaled else "shrink"
+    if _PRINT_PAPER_NAME:
+        return f"paper={_PRINT_PAPER_NAME},{mode}"
+    return mode
+
+def get_default_printer_name():
+    """يجلب اسم الطابعة الافتراضية مباشرة من Win32 API أو الريجستري (فوري بدون PowerShell أو أدمن)."""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+        sz = wintypes.DWORD(0)
+        winspool.GetDefaultPrinterW(None, ctypes.byref(sz))
+        if sz.value > 0:
+            buf = ctypes.create_unicode_buffer(sz.value)
+            if winspool.GetDefaultPrinterW(buf, ctypes.byref(sz)):
+                if buf.value.strip():
+                    return buf.value.strip()
+    except Exception as e:
+        _log_silent("get_default_printer_win32", e)
+    if WINREG_AVAILABLE:
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows NT\CurrentVersion\Windows")
+            val, _ = winreg.QueryValueEx(key, "Device")
+            winreg.CloseKey(key)
+            if val:
+                return str(val).split(",")[0].strip()
+        except Exception as e:
+            _log_silent("get_default_printer_reg", e)
+    return ""
+
+def open_default_printer_preferences():
+    """يفتح نافذة إعدادات الطابعة الافتراضية (Printing Preferences) مباشرة بدون أدمن، مع بديل لوحة الطابعات."""
+    if sys.platform != "win32":
+        return False
+    prn = get_default_printer_name()
+    sys32 = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")
+    rundll = os.path.join(sys32, "rundll32.exe")
+    if not os.path.exists(rundll):
+        rundll = "rundll32.exe"
+    try:
+        if prn:
+            subprocess.Popen([rundll, "printui.dll,PrintUIEntry", "/e", "/n", prn])
+            return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ui", e)
+    try:
+        subprocess.Popen(["control", "printers"])
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ctrl", e)
+    try:
+        os.startfile("ms-settings:printers")
+        return True
+    except Exception as e:
+        log_exception("open_default_printer_preferences#ms", e)
+    return False
+
+def list_printer_papers():
+    """مقاسات الورق اللي درايفر الطابعة الافتراضية بيدعمها: (اسم الطابعة, [(اسم الورق, عرض مم, طول مم)]).
+    يستخدم Win32 DeviceCapabilitiesW مباشرة (فوري بدون PowerShell أو أدمن)، مع PowerShell كبديل احتياطي."""
+    if sys.platform != "win32":
+        return "", []
+    prn = get_default_printer_name()
+    if prn:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            class _POINT(ctypes.Structure):
+                _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+            winspool = ctypes.WinDLL("winspool.drv", use_last_error=True)
+            winspool.DeviceCapabilitiesW.argtypes = [
+                wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.WORD, ctypes.c_void_p, ctypes.c_void_p
+            ]
+            winspool.DeviceCapabilitiesW.restype = wintypes.DWORD
+            DC_PAPERSIZE = 3
+            DC_PAPERNAMES = 16
+            n_names = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, None, None)
+            n_sizes = winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, None, None)
+            if 0 < n_names < 10000 and 0 < n_sizes < 10000:
+                cnt = min(n_names, n_sizes)
+                name_buf = ctypes.create_unicode_buffer(n_names * 64)
+                size_buf = (_POINT * n_sizes)()
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERNAMES, ctypes.byref(name_buf), None)
+                winspool.DeviceCapabilitiesW(prn, None, DC_PAPERSIZE, ctypes.byref(size_buf), None)
+                out = []
+                for i in range(cnt):
+                    raw_nm = name_buf[i * 64:(i + 1) * 64]
+                    nm = raw_nm.split("\x00", 1)[0].strip()
+                    w = round(size_buf[i].x / 10.0, 1)
+                    h = round(size_buf[i].y / 10.0, 1)
+                    if nm and w > 0 and h > 0:
+                        out.append((nm, w, h))
+                if out:
+                    return prn, out
+        except Exception as e:
+            log_exception("list_printer_papers_win32", e)
+
+    # بديل احتياطي عبر PowerShell لو Win32 مرجعش مقاسات
+    ps_cmd = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Drawing; "
+        "$ps = New-Object System.Drawing.Printing.PrinterSettings; "
+        "$items = @($ps.PaperSizes | ForEach-Object { [pscustomobject]@{n=$_.PaperName; w=$_.Width; h=$_.Height} }); "
+        "$o = [pscustomobject]@{printer=$ps.PrinterName; papers=$items}; "
+        "ConvertTo-Json -InputObject $o -Depth 3 -Compress"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=15)
+        d = json.loads(r.stdout.decode("utf-8", "replace").strip())
+        papers = d.get("papers") or []
+        if isinstance(papers, dict):
+            papers = [papers]
+        out = []
+        for it in papers:
+            nm = str(it.get("n") or "").strip()
+            w = float(it.get("w")) / 100.0 * 25.4
+            h = float(it.get("h")) / 100.0 * 25.4
+            if nm and w > 0 and h > 0:
+                out.append((nm, round(w, 1), round(h, 1)))
+        return str(d.get("printer") or prn or ""), out
+    except Exception as e:
+        log_exception("list_printer_papers", e)
+        return prn, []
+def set_default_printer_paper(w_mm, h_mm):
+    """بتضبط مقاس الورق في إعدادات الطابعة الافتراضية لليوزر الحالي (UserPrintTicket): بدون أدمن.
+    بترجّع dict فيه: ok, printer, w, h (المقاس الفعلي اللي الدرايفر قبله بالمم) أو err. بتتنفذ في thread مش في الواجهة."""
+    if sys.platform != "win32":
+        return {"ok": False, "err": "Windows required"}
+    w96 = float(w_mm) / 25.4 * 96.0      # PageMediaSize بوحدة 1/96 بوصة
+    h96 = float(h_mm) / 25.4 * 96.0
+    ps_cmd = (
+        "$ErrorActionPreference='Stop'; "
+        "try { "
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Add-Type -AssemblyName System.Printing; Add-Type -AssemblyName System.Drawing; "
+        "$name = (New-Object System.Drawing.Printing.PrinterSettings).PrinterName; "
+        "if (-not $name) { throw 'No default printer' }; "
+        "$srv = New-Object System.Printing.LocalPrintServer; "
+        "$q = New-Object System.Printing.PrintQueue($srv, $name, 1, [System.Printing.PrintSystemDesiredAccess]::UsePrinter); "
+        "$new = New-Object System.Printing.PrintTicket; "
+        f"$new.PageMediaSize = New-Object System.Printing.PageMediaSize([double]{w96:.3f}, [double]{h96:.3f}); "
+        "$m = $q.MergeAndValidatePrintTicket($q.UserPrintTicket, $new); "
+        "$q.UserPrintTicket = $m.ValidatedPrintTicket; "
+        "$q.Commit(); $q.Refresh(); "
+        "$r = $q.UserPrintTicket.PageMediaSize; "
+        "ConvertTo-Json -Compress -InputObject @{ok=$true; printer=$name; w=[double]$r.Width; h=[double]$r.Height} "
+        "} catch { ConvertTo-Json -Compress -InputObject @{ok=$false; err=$_.Exception.Message} }"
+    )
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps_cmd],
+            capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW, timeout=30)
+        d = json.loads(r.stdout.decode("utf-8", "replace").strip())
+        if d.get("ok"):
+            d["w"] = round(float(d.get("w") or 0) / 96.0 * 25.4, 1)
+            d["h"] = round(float(d.get("h") or 0) / 96.0 * 25.4, 1)
+        else:
+            log_exception("set_default_printer_paper", d.get("err"))
+        return d
+    except Exception as e:
+        log_exception("set_default_printer_paper", e)
+        return {"ok": False, "err": str(e)}
+
+MANUAL_NAME_RE = re.compile(r"^[_]?\d+(?:\.\d{2})?_\d{6}\.pdf$", re.IGNORECASE)
+
+SOUND_MUTED = True
+
+from logging.handlers import RotatingFileHandler
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    handlers=[RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=3, encoding="utf-8")],
+)
+
+def log_exception(context, exc):
+    try: logging.error(f"[{context}] {exc}")
+    except Exception as _e: _log_silent("log_exception#1", _e)
+
+load_print_paper()
+
+def db_connect():
+    """اتصال موحّد بقاعدة البيانات مع تفعيل WAL ومهلة انتظار 15 ثانية لمنع database is locked."""
+    conn = sqlite3.connect(DB_FILE, timeout=15)
+    try:
+        conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except Exception as e:
+        log_exception("db_connect", e)
+    return conn
+
+def init_local_database():
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS manual_tx (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                unit TEXT,
+                plate TEXT,
+                insured TEXT,
+                amount REAL,
+                created_at TEXT,
+                file_name TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS voids (
+                file_key TEXT PRIMARY KEY,
+                amount REAL,
+                plate TEXT,
+                reason TEXT,
+                voided_at TEXT,
+                voided_by TEXT
+            )
+        ''')
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS system_meta (
+                meta_key TEXT PRIMARY KEY,
+                meta_value TEXT
+            )
+        ''')
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        log_exception("init_db", e)
+
+init_local_database()
+
+_VOID_KEYS = {}
+
+def void_key(path_or_name):
+    return os.path.basename(path_or_name or "").lstrip("_")
+
+def load_void_map():
+    global _VOID_KEYS
+    mp = {}
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT file_key, reason, voided_at, voided_by FROM voids")
+        for k, r, at, by in c.fetchall():
+            mp[k] = {"reason": r or "", "at": at or "", "by": by or ""}
+        conn.close()
+    except Exception as e:
+        log_exception("load_void_map", e)
+    _VOID_KEYS = mp
+    return mp
+
+def add_void(file_key, amount, plate, reason):
+    by = os.environ.get("USERNAME") or os.environ.get("USER") or "-"
+    at = datetime.datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+    conn = db_connect()
+    try:
+        conn.execute("INSERT OR REPLACE INTO voids (file_key, amount, plate, reason, voided_at, voided_by) VALUES (?,?,?,?,?,?)",
+                     (file_key, float(amount), plate or "-", reason or "", at, by))
+        conn.commit()
+    finally:
+        conn.close()
+    _VOID_KEYS[file_key] = {"reason": reason or "", "at": at, "by": by}
+
+def remove_void(file_key):
+    conn = db_connect()
+    try:
+        conn.execute("DELETE FROM voids WHERE file_key = ?", (file_key,))
+        conn.commit()
+    finally:
+        conn.close()
+    _VOID_KEYS.pop(file_key, None)
+
+def refresh_void_flag(rec):
+    bname = os.path.basename(rec.get("path", "") or rec.get("file", ""))
+    key = bname.lstrip("_")
+    legacy = bname.startswith("_")
+    info = _VOID_KEYS.get(key)
+    rec["is_void"] = bool(legacy or info)
+    rec["legacy_void"] = legacy
+    rec["void_reason"] = (info or {}).get("reason", "")
+    return rec
+
+def ensure_archive_root(folder_path):
+    root = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+def archive_day_dir(folder_path, d):
+    return os.path.join(folder_path, ARCHIVE_DIRNAME, str(d.year),
+                        f"{d.month:02d}-{d.strftime('%B')}", f"{d.day:02d}")
+
+THEMES = {
+    "Windows Dark": {
+        "mode": "Dark",
+        "bg": "#202020", "card": "#2B2B2B", "sub_card": "#272727",
+        "border": "#454545", "input": "#232323", "text": "#FFFFFF",
+        "text_muted": "#9E9E9E", "primary": "#0078D4", "primary_hover": "#1B86D9",
+        "success": "#6CCB5F", "danger": "#F1707B", "warning": "#FFB900", "accent": "#60CDFF"
+    },
+    "Windows Light": {
+        "mode": "Light",
+        "bg": "#F3F3F3", "card": "#FFFFFF", "sub_card": "#FAFAFA",
+        "border": "#DDDDDD", "input": "#FFFFFF", "text": "#1B1B1B",
+        "text_muted": "#616161", "primary": "#0078D4", "primary_hover": "#106EBE",
+        "success": "#107C10", "danger": "#C42B1C", "warning": "#B44A0C", "accent": "#005A9E"
+    },
+    "Modern Dark": {
+        "mode": "Dark",
+        "bg": "#1A1F2B", "card": "#262D3E", "sub_card": "#202636",
+        "border": "#3A4358", "input": "#1B2130", "text": "#F5F6FA",
+        "text_muted": "#AEB6C8", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#34D399", "danger": "#F87171", "warning": "#F59E0B", "accent": "#E5B93C"
+    },
+    "Modern Light": {
+        "mode": "Light",
+        "bg": "#F4F4F5", "card": "#FFFFFF", "sub_card": "#FAFAFA",
+        "border": "#E4E4E7", "input": "#FAFAFA", "text": "#18181B",
+        "text_muted": "#52525B", "primary": "#2563EB", "primary_hover": "#1D4ED8",
+        "success": "#15803D", "danger": "#B91C1C", "warning": "#B45309", "accent": "#854D0E"
+    },
+    "Aero Dark": {
+        "mode": "Dark",
+        "bg": "#080E17", "card": "#121E2E", "sub_card": "#0F1926",
+        "border": "#1E2E42", "input": "#0A131F", "text": "#FFFFFF",
+        "text_muted": "#8FA3B8", "primary": "#0284C7", "primary_hover": "#0369A1",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#38BDF8"
+    },
+    "Light Modern": {
+        "mode": "Light",
+        "bg": "#F1F5F9", "card": "#FFFFFF", "sub_card": "#E2E8F0",
+        "border": "#CBD5E1", "input": "#F8FAFC", "text": "#0F172A",
+        "text_muted": "#475569", "primary": "#0284C7", "primary_hover": "#0369A1",
+        "success": "#047857", "danger": "#B91C1C", "warning": "#B45309", "accent": "#0369A1"
+    },
+    "Cyber Amber": {
+        "mode": "Dark",
+        "bg": "#0B0B0D", "card": "#17171C", "sub_card": "#111114",
+        "border": "#282832", "input": "#0E0E12", "text": "#FFFFFF",
+        "text_muted": "#9CA3AF", "primary": "#D97706", "primary_hover": "#B45309",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#FBBF24"
+    },
+    "Emerald Glass": {
+        "mode": "Dark",
+        "bg": "#04120D", "card": "#0A291E", "sub_card": "#061F17",
+        "border": "#123829", "input": "#051811", "text": "#FFFFFF",
+        "text_muted": "#86EFAC", "primary": "#059669", "primary_hover": "#047857",
+        "success": "#10B981", "danger": "#FB7185", "warning": "#F59E0B", "accent": "#34D399"
+    },
+    "Royal Purple": {
+        "mode": "Dark",
+        "bg": "#0E0717", "card": "#1E1033", "sub_card": "#170C28",
+        "border": "#2C1B4D", "input": "#110920", "text": "#FFFFFF",
+        "text_muted": "#A8A29E", "primary": "#7C3AED", "primary_hover": "#6D28D9",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#C084FC"
+    },
+    "Luxury Gold": {
+        "mode": "Dark",
+        "bg": "#110F0A", "card": "#1D1911", "sub_card": "#16130C",
+        "border": "#52431E", "input": "#14110B", "text": "#FFFBEB",
+        "text_muted": "#D4B872", "primary": "#9A6F08", "primary_hover": "#7A5806",
+        "success": "#10B981", "danger": "#F87171", "warning": "#F59E0B", "accent": "#F5C542"
+    },
+    "Metallic Silver": {
+        "mode": "Dark",
+        "bg": "#16191F", "card": "#232832", "sub_card": "#1C2028",
+        "border": "#5C6778", "input": "#1A1E26", "text": "#F8FAFC",
+        "text_muted": "#CBD5E1", "primary": "#4B5563", "primary_hover": "#374151",
+        "success": "#34D399", "danger": "#F87171", "warning": "#FBBF24", "accent": "#E2E8F0"
+    }
+}
+THEME_KEYS = list(THEMES.keys())
+
+# تباين النص الأبيض على اللون الأساسي كان أقل من 4.5:1 في أربع ثيمات (القراءة صعبة)؛ ده تغميق بسيط بيحقق المعيار.
+THEMES["Aero Dark"].update(primary="#0369A1", primary_hover="#075985")
+THEMES["Light Modern"].update(primary="#0369A1", primary_hover="#075985")
+THEMES["Cyber Amber"].update(primary="#B45309", primary_hover="#92400E")
+THEMES["Emerald Glass"].update(primary="#047857", primary_hover="#065F46")
+
+# ألوان الأزرار بحسب الدور: (لون, لون الـ hover). كل الأزرار من نفس الدور بقت بنفس اللون، وتتغيّر مع الثيم.
+#  primary = الإجراء الأساسي | success_btn = إنشاء/إضافة | tool = تقارير وأرشيف | warn_btn = طباعة ودفع
+#  secondary = أزرار محايدة | danger_btn = خطر/صلاحيات
+_ROLE_BTN = {
+    "Windows Dark": {
+        "secondary": ("#333333", "#414141"), "success_btn": ("#2B2B2B", "#17352B"),
+        "tool": ("#2B2B2B", "#242145"), "warn_btn": ("#2B2B2B", "#3A2A14"), "danger_btn": ("#2B2B2B", "#3A1D1D")},
+    "Windows Light": {
+        "secondary": ("#FFFFFF", "#F0F0F0"), "success_btn": ("#FFFFFF", "#F0F0F0"),
+        "tool": ("#FFFFFF", "#F0F0F0"), "warn_btn": ("#FFFFFF", "#F0F0F0"), "danger_btn": ("#C42B1C", "#A5231B")},
+    "Modern Dark": {
+        "secondary": ("#334155", "#475569"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Modern Light": {
+        "secondary": ("#52525B", "#3F3F46"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#4F46E5", "#4338CA"), "warn_btn": ("#D97706", "#B45309"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Aero Dark": {
+        "secondary": ("#334155", "#475569"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Light Modern": {
+        "secondary": ("#475569", "#334155"), "success_btn": ("#047857", "#065F46"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Cyber Amber": {
+        "secondary": ("#3F3F46", "#52525B"), "success_btn": ("#047857", "#065F46"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Emerald Glass": {
+        "secondary": ("#1E3A34", "#2A4D45"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#6D28D9", "#5B21B6"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#BE123C", "#9F1239")},
+    "Royal Purple": {
+        "secondary": ("#3B2A5A", "#4C3A73"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#1D4ED8", "#1E40AF"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+    "Luxury Gold": {
+        "secondary": ("#3A311D", "#4E4226"), "success_btn": ("#0F766E", "#115E59"),
+        "tool": ("#7C5A10", "#63460B"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#B91C1C", "#991B1B")},
+    "Metallic Silver": {
+        "secondary": ("#3F4756", "#525C6E"), "success_btn": ("#059669", "#047857"),
+        "tool": ("#475569", "#334155"), "warn_btn": ("#B45309", "#92400E"), "danger_btn": ("#DC2626", "#B91C1C")},
+}
+for _n, _roles in _ROLE_BTN.items():
+    for _k, (_c, _h) in _roles.items():
+        THEMES[_n][_k] = _c
+        THEMES[_n][_k + "_hover"] = _h
+
+# الأزرار المحايدة في الثيم الفاتح تحتاج نصًا داكنًا بأسلوب ويندوز
+for _rk in ("secondary", "success_btn", "tool", "warn_btn"):
+    THEMES["Windows Light"][_rk + "_text"] = "#1B1B1B"
+
+# ستايل زر التصفير لكل الأزرار في الوضع الداكن: خلفية محايدة وإطار ونص بلون الزر
+# ألوان الأزرار الأصلية من الثيمات الحالية (Modern Dark) بنفس التوزيع المعتاد
+THEMES["Windows Dark"].update(
+    primary_fg="#2B2B2B", primary_hoverbg="#1E2A44", primary_border="#2563EB", primary_text="#3B82F6",
+    success_btn_border="#059669", success_btn_text="#34D399",
+    tool_border="#4F46E5", tool_text="#818CF8",
+    warn_btn_border="#D97706", warn_btn_text="#F59E0B",
+    danger_btn_border="#DC2626", danger_btn_text="#F87171",
+)
+
+# أي زر في أي دور (أسماء الـ attributes في النافذة الرئيسية)
+BUTTON_ROLES = {
+    "primary": ["btn_run", "btn_pos_check", "btn_browse", "btn_view_rec"],
+    "success_btn": ["btn_manual", "btn_cash", "btn_open_f", "btn_excel"],
+    "tool": ["btn_summary_reopen", "btn_archive_downloads", "btn_arch_full"],
+    "warn_btn": ["btn_print_slip", "btn_fix_printer", "btn_mini_reprint"],
+    "secondary": ["btn_yesterday", "btn_today", "btn_lang", "btn_mute", "btn_back_to_mini", "btn_pdf_export", "btn_chrome"],
+    "danger_btn": ["btn_elevate"],
+}
+
+TAG_COLORS = {
+    "Dark": {
+        "odd": ("#22293A", "#F5F6FA"),
+        "dup": ("#6B1D2B", "#FECACA"), "wrong": ("#633A16", "#FED7AA"),
+        "missing": ("#5A4B14", "#FEF08A"), "manual": ("#1E3A68", "#BFDBFE"),
+        "void": ("#4A1D6B", "#F5D0FE")
+    },
+    "Light": {
+        "odd": ("#F1F5F9", "#18181B"),
+        "dup": ("#FFC7CE", "#9C0006"), "wrong": ("#F8CBAD", "#833C0B"),
+        "missing": ("#FFEB9C", "#7F6000"), "manual": ("#DDEBF7", "#1F3864"),
+        "void": ("#E9D5FF", "#581C87")
+    },
+}
+
+FONT_FAMILY = "Segoe UI"
+FONT_TITLE_LOGO = (FONT_FAMILY, 18, "bold")
+FONT_SECTION_LBL = (FONT_FAMILY, 10, "bold")
+FONT_REGULAR_BOLD = (FONT_FAMILY, 11, "bold")
+FONT_KPI_VAL = (FONT_FAMILY, 16, "bold")
+FONT_BTN_MAIN = (FONT_FAMILY, 12, "bold")
+FONT_BTN_SUB = (FONT_FAMILY, 11, "bold")
+FONT_ENTRY = (FONT_FAMILY, 11, "bold")
+
+
+def theme_btn_colors(t, kind="quiet"):
+    """primary = الإجراء المهم | quiet = باقي الأزرار | danger = خطر (مسح/إلغاء)"""
+    if kind == "primary": return t["primary"], t["primary_hover"]
+    if kind == "danger": return t["danger_btn"], t["danger_btn_hover"]
+    return t["secondary"], t["secondary_hover"]
+
+
+_KIND_ROLE = {"primary": "primary", "success": "success_btn", "tool": "tool",
+              "warn": "warn_btn", "danger": "danger_btn", "quiet": "secondary"}
+
+def _ghost(t, role):
+    """ألوان زر حسب الثيم: ثيمات الإطار الملون (Windows) ترجع خلفية محايدة وإطارًا ونصًا بلون الزر، وغيرها اللون المعبأ المعتاد."""
+    if t.get(role + "_text"):
+        return {"fg_color": t.get(role + "_fg", t[role]),
+                "hover_color": t.get(role + "_hoverbg", t[role + "_hover"]),
+                "border_width": 1, "border_color": t.get(role + "_border", t["border"]),
+                "text_color": t[role + "_text"], "text_color_disabled": t["text_muted"]}
+    return {"fg_color": t[role], "hover_color": t[role + "_hover"], "border_width": 0, "border_color": t["border"], "text_color": "#FFFFFF", "text_color_disabled": t["text_muted"]}
+
+def make_themed_button(parent, t, kind="quiet", **kw):
+    role = _KIND_ROLE.get(kind, "secondary")
+    kw.update(_ghost(t, role))
+    return ctk.CTkButton(parent, **kw)
+
+
+def style_entry(w, t):
+    try:
+        w.configure(fg_color=t["input"], border_color=t["border"], text_color=t["text"], border_width=1, corner_radius=8)
+    except Exception as _e: _log_silent("style_entry", _e)
+    try: w.configure(placeholder_text_color=t["text_muted"])
+    except Exception as _e: _log_silent("style_entry#ph", _e)
+
+
+def style_combo(w, t):
+    try:
+        w.configure(fg_color=t["input"], border_color=t["border"], button_color=t["border"],
+                    button_hover_color=t["primary"], text_color=t["text"], corner_radius=8,
+                    dropdown_fg_color=t["card"], dropdown_text_color=t["text"], dropdown_hover_color=t["primary"])
+    except Exception as _e: _log_silent("style_combo", _e)
+
+
+def apply_tree_style(t, rowheight=30):
+    """ستايل موحّد لكل الجداول (سجل الأرشيف + عرض السجلات): بدون حدود، عناوين أوضح، صفوف أعلى."""
+    style = ttk.Style()
+    try: style.theme_use("clam")
+    except Exception as _e: _log_silent("apply_tree_style#1", _e)
+    try: style.layout("A2R.Treeview", [("Treeview.treearea", {"sticky": "nswe"})])
+    except Exception as _e: _log_silent("apply_tree_style#2", _e)
+    style.configure("A2R.Treeview", background=t["input"], foreground=t["text"], fieldbackground=t["input"],
+                    font=(FONT_FAMILY, 10, "bold"), rowheight=rowheight, borderwidth=0, relief="flat")
+    style.configure("A2R.Treeview.Heading", background=t["sub_card"], foreground=t["accent"],
+                    font=(FONT_FAMILY, 10, "bold"), relief="flat", borderwidth=0, padding=(6, 6))
+    style.map("A2R.Treeview.Heading", background=[("active", t["card"])])
+    style.configure("Vertical.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
+                    arrowcolor=t["text_muted"], lightcolor=t["border"], darkcolor=t["border"], relief="flat")
+    style.map("Vertical.TScrollbar", background=[("active", t["primary"])])
+    style.configure("Horizontal.TScrollbar", background=t["border"], troughcolor=t["input"], bordercolor=t["input"],
+                    arrowcolor=t["text_muted"], lightcolor=t["border"], darkcolor=t["border"], relief="flat")
+    style.map("Horizontal.TScrollbar", background=[("active", t["primary"])])
+    def _fixed(option):
+        try: return [e for e in style.map("Treeview", query_opt=option) if e[:2] != ("!disabled", "!selected")]
+        except Exception: return []
+    style.map("A2R.Treeview", background=[("selected", t["primary"])] + _fixed("background"),
+              foreground=[("selected", "#FFFFFF")] + _fixed("foreground"))
+    return style
+
+LANGUAGES = {
+    "en": {
+        "toggle_btn": "🌐 عربي", "dir_path": "DIRECTORY PATH", "browse": "Browse", "open": "Open",
+        "date_lbl": "REPORT DATE", "today": "Today", "yesterday": "Yesterday",
+        "start": "⚡ START EXTRACTION", "reset": "Reset",
+        "manual": "➕ Manual", "summary_btn": "📊 Summary", "print_slip": "🖨️ Photocopy", "arch_hist_btn": "📚 Archive History", "view_records": "🔍 Records Viewer",
+        "export_pdf": "📄 PDF Summary", "kpi1": "OPERATIONS", "kpi2": "TOTAL SUM",
+        "open_excel": "📊 Open Excel", "currency": "EGP", "open_chrome": "🌐 Traffic Portal",
+        "cash_btn": "💵 Cash", "clean_downloads": "📦 Archive", "autosync_on": "Auto Sync ON", "autosync_off": "Auto Sync OFF",
+        "autoprint_on": "Auto Print ON", "autoprint_off": "Auto Print OFF", "invalid_date": "Invalid Date selected!",
+        "dir_missing": "Receipts directory not found!", "pdf_missing": "pdftotext.exe not found in directory:\n",
+        "summary_title": "Daily Inspection Summary", "unit_name_lbl": "Unit :", "period_lbl": "Date :",
+        "total_ops_lbl": "Operations :", "pdf_lbl": "Electronic PDFs :", "txt_lbl": "Manual Receipts :",
+        "void_ops_lbl": "Voided Receipts :", "duplicates_lbl": "Duplicates :", "wrong_lbl": "Other Unit :", "missing_lbl": "Incomplete :",
+        "total_amt_lbl": "Total Sum :", "unspecified_unit": "Unspecified Unit",
+        "records_viewer_title": "Transactions Viewer & Audit", "no_records_yet": "No records available yet. Run extraction first!",
+        "no_summary_yet": "Please run extraction first to view summary!", "search_placeholder": "Search name, plate, chassis, motor...",
+        "amt_filter_placeholder": "Amount...", "col_idx": "#", "col_unit": "Unit", "col_plate": "Plate No",
+        "col_insured": "Insured Name", "col_amount": "Amount", "col_time": "Time", "col_make": "Make",
+        "col_model": "Model", "col_chassis": "Chassis", "col_motor": "Motor", "col_period": "Period",
+        "col_file": "File", "col_status": "Status", "pos_box_title": "POS / CASH RECONCILIATION",
+        "pos_check_btn": "Match", "pos_matched": "✓ Matched", "pos_shortage": "⚠️ Short: ", "pos_excess": "⚠️ Extra: ",
+        "slip_dialog_title": "Print Photocopy Receipt Slip", "slip_name_lbl": "Employee / Client Name :",
+        "slip_unit_lbl": "Traffic Unit / Counter (Optional) :", "slip_date_lbl": "Date :", "slip_btn_print": "Print Now",
+        "open_pdf_btn": "Open Selected File", "confirm_reset": "Are you sure you want to clear current operations and reset dashboard?",
+        "btn_void_sel": "❌ Void Selected", "btn_restore_sel": "↩️ Restore Selected",
+        "records_stats": "Shown: {shown} | Net Total: {net:,.2f} EGP | Grand System Sum: {total:,.2f} EGP",
+        "legend_text": "🟥 Duplicate   🟪 Voided (Deducted)",
+        "menu_open_file": "Open Receipt File", "menu_void_tx": "❌ Void this Transaction", "menu_restore_tx": "↩️ Restore this Transaction",
+        "void_confirm_title": "Confirm Void", "void_confirm_msg": "Are you sure you want to void record #{idx} with amount {amt:.2f} EGP?",
+        "void_reason_title": "Void Reason", "void_reason_prompt": "Enter void reason (optional):",
+        "void_already": "This transaction is already voided!", "restore_already": "This transaction is not voided!",
+        "restore_confirm_title": "Confirm Restore", "restore_confirm_msg": "Do you want to restore record #{idx} with amount {amt:.2f} EGP?",
+        "arch_title": "Smart Downloads Archiver & Reports", "arch_subtitle": "Automatically moves receipts and creates a daily summary PDF",
+        "arch_dir_lbl": "Directory to Archive:", "arch_btn_browse": "Browse...",
+        "arch_open_day_title": "Open Archived Daily Summary", "arch_btn_open_day": "📄 Open Daily Summary",
+        "arch_btn_prev": "📁 Archive Previous Days & Build Summary PDFs", "arch_btn_all": "🗄️ Archive All Files & Build Summary PDFs",
+        "arch_btn_open_folder": "📂 Open Archive Root Folder", "arch_ready": "Ready to archive...",
+        "cash_win_title": "Cash & POS Reconciliation - A2R", "cash_hdr": "💵 Cash & POS Settlement",
+        "cash_manual_lbl": "Manual Cash Amount:", "cash_pos_lbl": "Total POS (Cards):", "cash_denom_lbl": "{d} EGP Note:",
+        "cash_tot_lbl": "Total Cash: {sum:,.2f} EGP", "cash_comb_lbl": "Combined Total (Cash + POS): {sum:,.2f} EGP",
+        "cash_matched_lbl": "✓ Perfectly Matched with Insurance System", "cash_short_lbl": "Shortage: -{val:,.2f} EGP", "cash_extra_lbl": "Excess: +{val:,.2f} EGP",
+        "cash_apply_btn": "Transfer Total to Matcher (Enter)", "manual_win_title": "Add Manual Receipt (PDF)",
+        "manual_amt_lbl": "Amount (EGP)*:", "manual_name_lbl": "Insured Name (Optional):", "manual_plate_lbl": "Plate No (Optional):",
+        "manual_unit_lbl": "Traffic Unit (Optional):", "manual_generate_btn": "Generate Manual Receipt PDF",
+        "cut": "Cut", "copy": "Copy", "paste": "Paste", "select_all": "Select All",
+        "restricted_admin": "This feature is restricted to administrator only!", "done": "Done",
+        "status_void": "Voided ❌", "status_dup": "Duplicate ×{n} ⚠️", "status_wrong": "Other Unit", "status_missing": "Missing: ", "status_manual": "Manual Receipt", "status_ok": "Valid Receipt",
+        "btn_full_console": "🖥️ Full Console", "btn_back_mini": "⚡ Mini Mode",
+        "login_prompt": "🔒 Enter Password to Access Full Console", "access_denied": "Incorrect password. Access denied!",
+        "mini_station_title": "A2R Mini Station", "mini_status_active": "● Instant Thermal Auto-Print Active",
+        "mini_printed_count": "🖨️ Auto-Printed Today: {count} Receipts",
+        "mini_reprint_last": "🖨️ Reprint Last",
+        "tray_open": "Open", "tray_console": "Full Console", "tray_exit": "Exit Application",
+        "btn_reprint": "🖨️ Reprint", "menu_reprint": "🖨️ Reprint Receipt", "reprint_success": "Receipt sent to printer!",
+        "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "Default printer paper set to 57x90 mm!"
+    },
+    "ar": {
+        "toggle_btn": "🌐 English", "dir_path": "مسار مجلد الإيصالات", "browse": "تحديد", "open": "فتح",
+        "date_lbl": "تاريخ التقرير", "today": "اليوم", "yesterday": "أمس",
+        "start": "⚡ بدء استخراج ومعالجة البيانات", "reset": "تصفير",
+        "manual": "➕ إضافة يدوي", "summary_btn": "📊 ملخص الفحص", "print_slip": "🖨️ إيصال تصوير", "arch_hist_btn": "📚 سجل الأرشيف", "view_records": "🔍 عرض السجلات",
+        "export_pdf": "📄 تقرير PDF", "kpi1": "عدد العمليات", "kpi2": "إجمالي مبالغ السيستم",
+        "open_excel": "📊 فتح الإكسيل", "currency": "ج.م", "open_chrome": "🌐 بوابة المرور",
+        "cash_btn": "💵 حاسبة الكاش", "clean_downloads": "📦 أرشفة", "autosync_on": "مزامنة تلقائية: مفعل", "autosync_off": "مزامنة تلقائية: معطل",
+        "autoprint_on": "طباعة فورية: مفعل", "autoprint_off": "طباعة فورية: معطل", "invalid_date": "التاريخ المحدد غير صحيح!",
+        "dir_missing": "مجلد الإيصالات المحدد غير موجود!",
+        "pdf_missing": "ملف pdftotext.exe غير موجود في المجلد:\n",
+        "summary_title": "ملخص فحص الوحدة", "unit_name_lbl": "وحدة المرور :", "period_lbl": "التاريخ :",
+        "total_ops_lbl": "إجمالي العمليات :", "pdf_lbl": "إيصالات إلكترونية :", "txt_lbl": "معاملات يدوية :",
+        "void_ops_lbl": "معاملات ملغية :", "duplicates_lbl": "عدد المكرر :", "wrong_lbl": "وحدة مختلفة :", "missing_lbl": "ناقص :",
+        "total_amt_lbl": "إجمالي المبلغ :", "unspecified_unit": "وحدة غير محددة",
+        "records_viewer_title": "عرض السجلات ومطابقتها", "no_records_yet": "لا توجد سجلات بعد. يرجى تشغيل المعالجة أولاً.",
+        "no_summary_yet": "يرجى تشغيل عملية الاستخراج أولاً لعرض ملخص الفحص!", "search_placeholder": "بحث بالاسم، اللوحة، الشاسيه، الموتور...",
+        "amt_filter_placeholder": "المبلغ...", "col_idx": "م", "col_unit": "الوحدة", "col_plate": "رقم اللوحة",
+        "col_insured": "اسم المؤمن له", "col_amount": "المبلغ", "col_time": "الوقت", "col_make": "الماركة",
+        "col_model": "الموديل", "col_chassis": "الشاسيه", "col_motor": "الموتور", "col_period": "المدة",
+        "col_file": "الملف", "col_status": "الحالة", "pos_box_title": "مطابقة الخزينة (POS + كاش)",
+        "pos_check_btn": "مطابقة", "pos_matched": "✓ مطابق", "pos_shortage": "⚠️ عجز: ", "pos_excess": "⚠️ زيادة: ",
+        "slip_dialog_title": "طباعة إيصال التصوير", "slip_name_lbl": "اسم الموظف / العميل :",
+        "slip_unit_lbl": "الوحدة / المنفذ (اختياري) :", "slip_date_lbl": "التاريخ :", "slip_btn_print": "طباعة الآن",
+        "open_pdf_btn": "فتح الملف المحدد", "confirm_reset": "هل أنت متأكد من رغبتك في تصفير الشاشة والبيانات الحالية؟",
+        "btn_void_sel": "❌ إلغاء المحددة", "btn_restore_sel": "↩️ استرجاع الملغية",
+        "records_stats": "المعروض: {shown} | الصافي: {net:,.2f} ج.م | الإجمالي العام: {total:,.2f} ج.م",
+        "legend_text": "🟥 مكرر   🟪 ملغي (مخصوم)",
+        "menu_open_file": "فتح ملف المعاملة", "menu_void_tx": "❌ إلغاء هذه المعاملة (تسجيل في قاعدة البيانات)", "menu_restore_tx": "↩️ استرجاع هذه المعاملة كمعاملة سليمة",
+        "void_confirm_title": "تأكيد الإلغاء", "void_confirm_msg": "هل أنت متأكد من إلغاء المعاملة رقم {idx} بمبلغ {amt:.2f} ج.م وخصمها من الإجمالي؟",
+        "void_reason_title": "سبب الإلغاء", "void_reason_prompt": "اكتب سبب الإلغاء (اختياري):",
+        "void_already": "هذه المعاملة ملغية بالفعل!", "restore_already": "هذه المعاملة غير ملغية لتتم استعادتها!",
+        "restore_confirm_title": "تأكيد الاسترجاع", "restore_confirm_msg": "هل تريد استرجاع المعاملة رقم {idx} بمبلغ {amt:.2f} ج.م وإلغاء خصمها؟",
+        "arch_title": "📦 أرشفة مجلد الإيصالات وإدارة التقارير", "arch_subtitle": "يتم نقل الملفات مع توليد ملخص لكل يوم مؤرشف تلقائياً",
+        "arch_dir_lbl": "المجلد المراد أرشفته:", "arch_btn_browse": "تحديد...",
+        "arch_open_day_title": "فتح ملخص الفحص لأي يوم مؤرشف", "arch_btn_open_day": "📄 فتح ملخص اليوم",
+        "arch_btn_prev": "📁 أرشفة الأيام السابقة وتوليد ملفات سامري PDF", "arch_btn_all": "🗄️ أرشفة كل الملفات القديمة وتوليد سامري PDF",
+        "arch_btn_open_folder": "📂 فتح مجلد الأرشيف للمسار المختار", "arch_ready": "جاهز للأرشفة...",
+        "cash_win_title": "تسوية النقدية والـ POS - A2R", "cash_hdr": "💵 تسوية الخزينة (كاش + POS)",
+        "cash_manual_lbl": "المبلغ كاش (يدوي):", "cash_pos_lbl": "إجمالي الـ POS (فيزا):", "cash_denom_lbl": "فئة {d} ج:",
+        "cash_tot_lbl": "إجمالي الكاش: {sum:,.2f} ج.م", "cash_comb_lbl": "المجموع الإجمالي (كاش + POS): {sum:,.2f} ج.م",
+        "cash_matched_lbl": "✓ مطابق لسيستم التأمين تماماً", "cash_short_lbl": "عجز: -{val:,.2f} ج.م", "cash_extra_lbl": "زيادة: +{val:,.2f} ج.م",
+        "cash_apply_btn": "ترحيل الإجمالي وإغلاق (Enter)", "manual_win_title": "إضافة معاملة يدوية (PDF)",
+        "manual_amt_lbl": "المبلغ (جنيه)*:", "manual_name_lbl": "اسم المؤمن له (اختياري):", "manual_plate_lbl": "رقم اللوحة (اختياري):",
+        "manual_unit_lbl": "وحدة المرور (اختياري):", "manual_generate_btn": "توليد إيصال تحصيل يدوي PDF",
+        "cut": "قص", "copy": "نسخ", "paste": "لصق", "select_all": "تحديد الكل",
+        "restricted_admin": "هذه الصلاحية متاحة للمشرف فقط!", "done": "تم",
+        "status_void": "ملغي ❌", "status_dup": "مكرر ×{n} ⚠️", "status_wrong": "وحدة مختلفة", "status_missing": "ناقص: ", "status_manual": "معاملة يدوية", "status_ok": "إيصال سليم",
+        "btn_full_console": "🖥️ النسخة الكاملة", "btn_back_mini": "⚡ وضع الميني",
+        "login_prompt": "🔒 أدخل كلمة المرور لفتح النسخة الكاملة", "access_denied": "كلمة المرور غير صحيحة!",
+        "mini_station_title": "A2R Mini Station", "mini_status_active": "● محرك الطباعة الفورية يعمل بنشاط",
+        "mini_printed_count": "🖨️ المطبوع اليوم تلقائياً: {count} إيصال",
+        "mini_reprint_last": "🖨️ إعادة طباعة الأخير",
+        "tray_open": "فتح البرنامج", "tray_console": "النسخة الكاملة", "tray_exit": "إغلاق البرنامج نهائياً",
+        "btn_reprint": "🖨️ إعادة طباعة", "menu_reprint": "🖨️ إعادة طباعة هذا الإيصال", "reprint_success": "تم إرسال الإيصال للطابعة الحرارية!",
+        "btn_fix_printer": "⚙️ 57x90", "fix_printer_ok": "تم ضبط مقاس الطابعة الافتراضية 57x90 مم بنجاح!"
+    }
+}
+
+CURRENT_LANG = "en"
+
+def tr(key, **kwargs):
+    text = LANGUAGES.get(CURRENT_LANG, LANGUAGES["en"]).get(key, key)
+    if kwargs:
+        try: return text.format(**kwargs)
+        except Exception as _e: _log_silent("tr#1", _e)
+    return text
+
+def format_arabic_for_dropdown(text):
+    if not text: return ""
+    if REPORTLAB_AVAILABLE and re.search(r"[\u0621-\u064A]", text):
+        try:
+            return get_display(arabic_reshaper.reshape(text))
+        except Exception as _e:
+            _log_silent("format_arabic_for_dropdown#1", _e)
+    return text
+
+MANUAL_MAX_AMOUNT = 10_000_000
+
+def parse_manual_amount(raw):
+    """نص المبلغ → رقم صالح أو None. بيرفض nan/inf والصفر والسالب والمبلغ الضخم جدًا (غالبًا غلطة كتابة).
+    '521,57' = فاصلة عشرية، و'1,500' = فاصل آلاف. والمبلغ بيتقرّب لخانتين عشان الملف والقاعدة يتطابقوا."""
+    s = str(raw or "").strip().replace("٫", ".")
+    if not s:
+        return None
+    if re.fullmatch(r"\d+,\d{1,2}", s):
+        s = s.replace(",", ".")
+    else:
+        s = s.replace(",", "")
+    try:
+        v = float(s)
+    except ValueError:
+        return None
+    if not _math.isfinite(v) or v <= 0 or v > MANUAL_MAX_AMOUNT:
+        return None
+    return round(v, 2)
+
+def unique_manual_filename(dest, amt, now_dt):
+    """اسم الملف amount_HHMMSS.pdf. لو موجود (نفس المبلغ في نفس الثانية) بنزوّد ثانية عشان ميتكتبش فوق إيصال موجود."""
+    for _ in range(60):
+        base = f"{amt:.2f}_{now_dt.strftime('%H%M%S')}.pdf"
+        if not os.path.exists(os.path.join(dest, base)) and not os.path.exists(os.path.join(dest, "_" + base)):
+            return base, now_dt
+        now_dt += datetime.timedelta(seconds=1)
+    return base, now_dt
+
+def play_sound_matched():
+    if SOUND_MUTED: return
+    def _tone():
+        try:
+            winsound.Beep(987, 100)
+            winsound.Beep(1318, 120)
+            winsound.Beep(1760, 160)
+        except Exception as _e: _log_silent("_tone#1", _e)
+    threading.Thread(target=_tone, daemon=True).start()
+
+def play_sound_diff():
+    if SOUND_MUTED: return
+    def _tone():
+        try:
+            winsound.Beep(520, 150)
+            winsound.Beep(440, 200)
+        except Exception as _e: _log_silent("_tone#2", _e)
+    threading.Thread(target=_tone, daemon=True).start()
+
+def _entry_widget(widget):
+    return widget._entry if hasattr(widget, "_entry") else widget
+
+def _entry_editable(t):
+    try: return str(t.cget("state")) == "normal"
+    except Exception: return True
+
+def _clip_copy(t, cut=False):
+    try:
+        if not t.selection_present(): return
+        a, b = t.index("sel.first"), t.index("sel.last")
+        txt = t.get()[a:b]
+    except tk.TclError: return
+    try:
+        t.clipboard_clear()
+        t.clipboard_append(txt)
+    except tk.TclError: return
+    if cut and _entry_editable(t):
+        try: t.delete(a, b)
+        except tk.TclError: pass
+
+def _clip_paste(t):
+    if not _entry_editable(t): return
+    try: text = t.clipboard_get()
+    except tk.TclError: return
+    text = text.replace("\r", "").replace("\n", " ")
+    try:
+        if t.selection_present():
+            t.delete("sel.first", "sel.last")
+    except tk.TclError: pass
+    try: t.insert("insert", text)
+    except tk.TclError: pass
+
+def _clip_select_all(t):
+    try:
+        t.select_range(0, "end")
+        t.icursor("end")
+    except tk.TclError: pass
+
+def attach_context_menu(widget):
+    target = _entry_widget(widget)
+    menu = tk.Menu(target, tearoff=0)
+    menu.add_command(label=tr("cut"), command=lambda: _clip_copy(target, cut=True))
+    menu.add_command(label=tr("copy"), command=lambda: _clip_copy(target))
+    menu.add_command(label=tr("paste"), command=lambda: _clip_paste(target))
+    menu.add_separator()
+    menu.add_command(label=tr("select_all"), command=lambda: _clip_select_all(target))
+
+    def show_menu(event):
+        menu.entryconfigure(0, label=tr("cut"))
+        menu.entryconfigure(1, label=tr("copy"))
+        menu.entryconfigure(2, label=tr("paste"))
+        menu.entryconfigure(4, label=tr("select_all"))
+        target.focus_set()
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    target.bind("<Button-3>", show_menu)
+
+def install_clipboard_shortcuts(root):
+    def handler(event):
+        w = event.widget
+        try: cls = w.winfo_class()
+        except Exception: return None
+        if cls not in ("Entry", "TEntry"): return None
+        kc = event.keycode
+        ks = (event.keysym or "").lower()
+        if kc == 65:
+            _clip_select_all(w)
+        elif kc in (67, 86, 88) and ks not in ("c", "v", "x"):
+            if kc == 67: _clip_copy(w)
+            elif kc == 88: _clip_copy(w, cut=True)
+            else: _clip_paste(w)
+        else:
+            return None
+        return "break"
+    root.bind_all("<Control-KeyPress>", handler)
+
+def _win_scale(win):
+    try:
+        sc = float(win._get_window_scaling())
+        return sc if sc > 0 else 1.0
+    except Exception:
+        return 1.0
+
+def _focus_target(widget):
+    if widget is None:
+        return
+    try:
+        t = _entry_widget(widget)
+        if t is not None and t.winfo_exists():
+            t.focus_force()
+            t.focus_set()
+    except Exception as _e:
+        _log_silent("focus_target", _e)
+
+def _set_win_alpha(win, alpha):
+    """تغيير شفافية النافذة بسلاسة (0.0 أثناء الرسم، 1.0 بعد الاكتمال) بدون withdraw اللي بتتعارض مع CustomTkinter."""
+    try:
+        if win.winfo_exists():
+            win.attributes("-alpha", float(alpha))
+    except Exception as _e:
+        _log_silent("set_win_alpha", _e)
+
+def _win32_raise(win):
+    """رفع فعلي للنافذة نفسها على مستوى ويندوز 64-bit باستخدام GetAncestor(GA_ROOT) بدون المساس بالنافذة الرئيسية."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+        user32.GetAncestor.restype = wintypes.HWND
+        user32.SetWindowPos.argtypes = [
+            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+            ctypes.c_int, ctypes.c_int, wintypes.UINT
+        ]
+        user32.SetWindowPos.restype = wintypes.BOOL
+        user32.BringWindowToTop.argtypes = [wintypes.HWND]
+        user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+        hwnd = wintypes.HWND(win.winfo_id())
+        root_hwnd = user32.GetAncestor(hwnd, 2) or hwnd  # GA_ROOT = 2 (النافذة نفسها فقط، ليس المالك)
+        SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW = 0x0002, 0x0001, 0x0040
+        HWND_TOPMOST = wintypes.HWND(-1)
+        HWND_NOTOPMOST = wintypes.HWND(-2)
+        user32.SetWindowPos(root_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+        user32.BringWindowToTop(root_hwnd)
+        user32.SetForegroundWindow(root_hwnd)
+        user32.SetWindowPos(root_hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW)
+    except Exception as _e:
+        _log_silent("win32_raise", _e)
+
+def bring_window_to_front(win, focus_widget=None, delay=15):
+    """يظهر النافذة مكتملة في إطار واحد بسلاسة ويرفعها أمام البرنامج بشكل مضمون مع توجيه مؤشر الكتابة."""
+    def _raise():
+        try:
+            if not win.winfo_exists():
+                return
+            win.update_idletasks()
+            try:
+                if win.state() != "normal":
+                    win.deiconify()
+                    win.state("normal")
+            except Exception as _e:
+                _log_silent("bring_window_to_front#st", _e)
+            _set_win_alpha(win, 1.0)
+            win.lift()
+            win.attributes("-topmost", True)
+            _win32_raise(win)
+            win.focus_force()
+            if focus_widget is not None:
+                _focus_target(focus_widget)
+            def _release():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    _set_win_alpha(win, 1.0)
+                    win.attributes("-topmost", False)
+                    win.lift()
+                    _win32_raise(win)
+                    if focus_widget is not None:
+                        _focus_target(focus_widget)
+                except Exception as _e:
+                    _log_silent("bring_window_to_front#rel", _e)
+            # 360ms: بعد انتهاء مؤقت CustomTkinter (200ms) وتطبيق الأيقونة (300ms) عشان النافذة تفضل قدام التطبيق دائمًا
+            win.after(360, _release)
+        except Exception as _e:
+            _log_silent("bring_window_to_front", _e)
+    try:
+        if delay <= 0:
+            _raise()
+        else:
+            win.after(delay, _raise)
+    except Exception as _e:
+        _log_silent("bring_window_to_front#sched", _e)
+
+def center_window_relative(win, parent, width, height, focus_widget=None):
+    win.update_idletasks()
+    set_window_icon_safe(win)
+    sc = _win_scale(win)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(int(width), int((sw - 40) / sc))
+    h = min(int(height), int((sh - 80) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
+    try: parent_hidden = (parent.state() == "withdrawn")
+    except Exception: parent_hidden = False
+    if parent_hidden:
+        x = max(0, (sw - pw_phys) // 2)
+        y = max(0, (sh - ph_phys) // 2)
+        win.geometry(f"{w}x{h}+{x}+{y}")
+        bring_window_to_front(win, focus_widget=focus_widget)
+        return
+    px, py = parent.winfo_rootx(), parent.winfo_rooty()
+    pw, ph = parent.winfo_width(), parent.winfo_height()
+    x = max(0, min(px + (pw - pw_phys) // 2, sw - pw_phys - 10))
+    y = max(0, min(py + (ph - ph_phys) // 2, sh - ph_phys - 40))
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    win.transient(parent)
+    bring_window_to_front(win, focus_widget=focus_widget)
+
+def fit_and_center(win, parent, width, min_height=180, focus_widget=None):
+    """يحسب الارتفاع الفعلي للنافذة بعد رسم كل العناصر حتى لا يُقص أي زر أو تذييل، ثم يوسّطها ويرفعها للأمام."""
+    win.update_idletasks()
+    sc = _win_scale(win)
+    req_h = max(int(min_height), int(win.winfo_reqheight() / sc) + 10)
+    center_window_relative(win, parent, width, req_h, focus_widget=focus_widget)
+
+# حجم موحد ومتناسق لنافذتي 📚 سجل الأرشيف و🔍 عرض السجلات (يحترم نسبة تكبير شاشة ويندوز)
+LOG_WIN_W, LOG_WIN_H = 880, 510
+LOG_WIN_MIN_W, LOG_WIN_MIN_H = 740, 410
+
+def center_window_on_screen(win, width, height, show=True):
+    """يوسّط النافذة في نص الشاشة مع مراعاة نسبة تكبير ويندوز."""
+    win.update_idletasks()
+    set_window_icon_safe(win)
+    sc = _win_scale(win)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w = min(int(width), int((sw - 48) / sc))
+    h = min(int(height), int((sh - 100) / sc))
+    pw_phys, ph_phys = int(w * sc), int(h * sc)
+    x = max(0, (sw - pw_phys) // 2)
+    y = max(0, (sh - ph_phys) // 2 - 16)
+    win.geometry(f"{w}x{h}+{x}+{y}")
+    if show:
+        bring_window_to_front(win)
+
+# ── تلميحات الأزرار + Esc لكل النوافذ + النوافذ بتفتكر حجمها ومكانها ─────────────────
+class _Tooltip:
+    """تلميح بيظهر لما الماوس يقف على الزر شوية. text ممكن يكون نص أو دالة بترجّع النص باللغة الحالية."""
+    def __init__(self, widget, text, delay=450):
+        self.widget, self.text, self.delay = widget, text, delay
+        self._job, self._tip = None, None
+        for seq, fn in (("<Enter>", self._schedule), ("<Leave>", self._hide),
+                        ("<ButtonPress>", self._hide), ("<Destroy>", self._hide)):
+            try: widget.bind(seq, fn, add="+")
+            except Exception as _e: _log_silent("tooltip#bind", _e)
+
+    def _schedule(self, e=None):
+        self._cancel()
+        try: self._job = self.widget.after(self.delay, self._show)
+        except Exception: self._job = None
+
+    def _cancel(self):
+        if self._job is not None:
+            try: self.widget.after_cancel(self._job)
+            except Exception as _e: _log_silent("tooltip#cancel", _e)
+            self._job = None
+
+    def _show(self):
+        self._job = None
+        if self._tip is not None: return
+        try:
+            txt = self.text() if callable(self.text) else self.text
+            if not txt: return
+            tip = tk.Toplevel(self.widget)
+            tip.wm_overrideredirect(True)
+            try: tip.attributes("-topmost", True)
+            except Exception as _e: _log_silent("tooltip#topmost", _e)
+            tk.Label(tip, text=txt, justify="left", background="#1F2937", foreground="#F9FAFB",
+                     relief="solid", borderwidth=1, font=(FONT_FAMILY, 9), padx=6, pady=3).pack()
+            tip.update_idletasks()
+            x = min(self.widget.winfo_pointerx() + 12, tip.winfo_screenwidth() - tip.winfo_reqwidth() - 4)
+            y = self.widget.winfo_pointery() + 18
+            tip.wm_geometry(f"+{max(0, x)}+{y}")
+            self._tip = tip
+        except Exception as e: _log_silent("tooltip#show", e)
+
+    def _hide(self, e=None):
+        self._cancel()
+        if self._tip is not None:
+            try: self._tip.destroy()
+            except Exception as _e: _log_silent("tooltip#hide", _e)
+            self._tip = None
+
+def add_tooltip(widget, text):
+    """بيضيف تلميح للزر (مرة واحدة بس لكل زر). text = نص أو دالة بترجّع النص."""
+    try:
+        if widget is None or getattr(widget, "_a2r_tip", None) is not None: return
+        widget._a2r_tip = _Tooltip(widget, text)
+    except Exception as e: _log_silent("add_tooltip", e)
+
+def close_toplevel_gracefully(win):
+    """بيقفل النافذة بنفس طريقة زر X: لو ليها WM_DELETE_WINDOW مخصوص بينفّذه، وإلا destroy."""
+    try: cmd = win.protocol("WM_DELETE_WINDOW")
+    except Exception: cmd = ""
+    try:
+        if cmd: win.tk.call(cmd)
+        else: win.destroy()
+    except Exception as e:
+        _log_silent("close_toplevel", e)
+        try: win.destroy()
+        except Exception as _e: _log_silent("close_toplevel#destroy", _e)
+
+def _saved_win_geom(key):
+    try:
+        g = (_read_app_config().get("win_geom") or {}).get(key)
+        if isinstance(g, list) and len(g) == 4: return [int(v) for v in g]
+    except Exception as e: _log_silent("saved_win_geom", e)
+    return None
+
+def _save_win_geom(key, geom):
+    try:
+        d = _read_app_config()
+        wg = d.get("win_geom") if isinstance(d.get("win_geom"), dict) else {}
+        wg[key] = [int(v) for v in geom]
+        d["win_geom"] = wg
+        tmp = CONFIG_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, CONFIG_FILE)
+    except Exception as e: log_exception("save_win_geom", e)
+
+def remember_window_geometry(win, key):
+    """بيرجّع النافذة لآخر حجم ومكان اتقفلت عليهم (جوه حدود الشاشة)، وبيحفظهم تاني لما تتقفل.
+    بيتخزن في %APPDATA%\\A2R\\config.json تحت win_geom لكل يوزر. لازم يتنده بعد ما الحجم الافتراضي يتحط."""
+    try:
+        saved = _saved_win_geom(key)
+        if saved:
+            sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+            try: sc = float(win._get_window_scaling()) or 1.0
+            except Exception: sc = 1.0
+            w, h, x, y = saved
+            w = max(300, min(w, int((sw - 20) / sc)))
+            h = max(200, min(h, int((sh - 60) / sc)))
+            x = max(0, min(x, sw - int(w * sc)))
+            y = max(0, min(y, sh - int(h * sc) - 40))
+            win.geometry(f"{w}x{h}+{x}+{y}")
+        last = {"g": None}
+
+        def _track(e):
+            if e.widget is not win: return
+            try:
+                if win.state() != "normal" or win.attributes("-fullscreen"): return
+                nums = [int(n) for n in re.findall(r"-?\d+", win.geometry())]
+                if len(nums) == 4: last["g"] = nums
+            except Exception as _e: _log_silent("remember_geom#track", _e)
+
+        def _flush(e):
+            if e.widget is win and last["g"]: _save_win_geom(key, last["g"])
+
+        win.bind("<Configure>", _track, add="+")
+        win.bind("<Destroy>", _flush, add="+")
+    except Exception as e: _log_silent("remember_window_geometry", e)
+
+def clean_arabic(text):
+    bidi_chars = ['\u202a', '\u202b', '\u202c', '\u202d', '\u202e', '\u200e', '\u200f', '\u061c', '\u2066', '\u2067', '\u2068', '\u2069', 'ـ']
+    for c in bidi_chars: text = text.replace(c, '')
+    return unicodedata.normalize('NFKC', text)
+
+UNITS_LIST = [
+    "ابيس 1", "ابيس 2", "ابيس 3",
+    "برج العرب 1", "برج العرب 2", "برج العرب 3", "برج العرب 4",
+    "المنتزة 1", "المنتزة 2", "المنتزة 3",
+    "محرم بك 1", "محرم بك 2",
+    "العجمي 1", "العجمي 2",
+    "القبارى", "مصطفى كامل", "مديرية الأمن", "ميناء الإسكندرية", "مجمع خدمات مصر",
+    "ابيس (احتياطي)",
+    "برج العرب (احتياطي 1)",
+    "برج العرب (احتياطي 2)",
+    "المنتزة (احتياطي)",
+    "محرم بك (احتياطي)",
+    "العجمي (احتياطي)"
+]
+
+# قاعدة بيانات: الوحدة -> رقم الماكينة (Terminal ID)
+UNIT_TERMINALS = {
+    "ابيس 1": "50335710",
+    "ابيس 2": "50335993",
+    "ابيس 3": "50335987",
+    "برج العرب 1": "50325716",
+    "برج العرب 2": "50335998",
+    "برج العرب 3": "50335994",
+    "برج العرب 4": "50335711",
+    "المنتزة 1": "50382298",
+    "المنتزة 2": "50382315",
+    "المنتزة 3": "50383712",
+    "محرم بك 1": "50382306",
+    "محرم بك 2": "50382316",
+    "العجمي 1": "50382308",
+    "العجمي 2": "50383706",
+    "القبارى": "50382300",
+    "مصطفى كامل": "50383702",
+    "مديرية الأمن": "50382312",
+    "ميناء الإسكندرية": "50383699",
+    "مجمع خدمات مصر": "50383700",
+    "ابيس (احتياطي)": "50325765",
+    "برج العرب (احتياطي 1)": "50322364",
+    "برج العرب (احتياطي 2)": "50322361",
+    "المنتزة (احتياطي)": "50382150",
+    "محرم بك (احتياطي)": "50381092",
+    "العجمي (احتياطي)": "50381077",
+}
+
+EMPLOYEES_LIST = [
+    "خالد محمد", "محمد السيد", "محمد زكريا", "احمد مصطفى", "زياد أحمد",
+    "مصطفى محمد", "ادهم ماهر", "احمد وليد", "عبدالله محمد", "محمد مجدى",
+    "سماح جمال", "امير حسين", "احمد سعيد", "كريم صبرى", "احمد مجدى",
+    "عمر فتحى", "محمد احمد", "احمد جابر", "باسم محمد", "باسم مصطفى", "احمد رمضان"
+]
+
+STRICT_UNITS = [
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*ابيس", "وحدة مرور ابيس"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*برج\s+العرب", "وحدة مرور برج العرب"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*المنتز[ةه]", "وحدة مرور المنتزة"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*محرم\s+بك", "وحدة مرور محرم بك"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*العجم[ىي]", "وحدة مرور العجمي"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*القبار[ىي]", "وحدة مرور القبارى"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*مصطف[ىي]\s+كامل", "وحدة مرور مصطفى كامل"),
+    (r"(?:وحدة\s+مرور|مرور|وحدة)?\s*مديري[ةه]\s+الأمن", "وحدة مرور مديرية الأمن"),
+    (r"(?:منفذ|ميناء)\s+الإسكندري[ةه]|ميناء\s+اسكندري[ةه]", "منفذ ميناء الإسكندرية"),
+    (r"مجمع\s+خدمات\s+مصر", "مجمع خدمات مصر")
+]
+UNIT_NAMES = [v for _, v in STRICT_UNITS]
+
+def detect_unit_from_text(text):
+    if not text: return None
+    cleaned = clean_arabic(text)
+    for pattern, mapped_val in STRICT_UNITS:
+        if re.search(pattern, cleaned): return mapped_val
+    return None
+
+def parse_print_time(time_str):
+    time_str = time_str.strip()
+    patterns = [
+        ("%H:%M %d-%m-%Y", r"^\d{2}:\d{2}\s+\d{2}-\d{2}-\d{4}$"),
+        ("%d-%m-%Y %H:%M", r"^\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}$"),
+        ("%Y-%m-%d %H:%M", r"^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}$"),
+        ("%d/%m/%Y %H:%M", r"^\d{2}/\d{2}/\d{4}\s+\d{2}:\d{2}$"),
+        ("%H:%M %d/%m/%Y", r"^\d{2}:\d{2}\s+\d{2}/\d{2}/\d{4}$")
+    ]
+    for fmt, pat in patterns:
+        if re.match(pat, time_str):
+            try: return datetime.datetime.strptime(time_str, fmt)
+            except Exception as _e: _log_silent("parse_print_time#1", _e)
+    return None
+
+def extract_date_from_text(txt):
+    if not txt: return None
+    time_m = re.search(r"(\d{2}:\d{2}\s+\d{2}[-/]\d{2}[-/]\d{4})|(\d{2}[-/]\d{2}[-/]\d{4}\s+\d{2}:\d{2})|(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2})", txt)
+    if time_m:
+        raw_t = time_m.group(0).strip().replace("/", "-")
+        dt_obj = parse_print_time(raw_t)
+        if dt_obj: return dt_obj.date()
+    dates = re.findall(r"\b(\d{2}[-/]\d{2}[-/]\d{4})\b|\b(\d{4}[-/]\d{2}[-/]\d{2})\b", txt)
+    for d1, d2 in dates:
+        d_str = (d1 or d2).replace("/", "-")
+        for fmt in ("%d-%m-%Y", "%Y-%m-%d"):
+            try:
+                return datetime.datetime.strptime(d_str, fmt).date()
+            except Exception as _e: _log_silent("extract_date_from_text#1", _e)
+    return None
+
+def create_manual_receipt_pdf(filepath, unit_val, plate_val, name_val, amt_val, op_dt=None):
+    if not REPORTLAB_AVAILABLE:
+        raise Exception("ReportLab is not installed!")
+    op_dt = op_dt or datetime.datetime.now()
+    PAGE_W, PAGE_H = 160, 240          # مقاس التصميم؛ بيتكبّر بنفس النسبة ليملا عرض الورق المختار
+    roll_w_mm = _PRINT_PAPER_MM[0] if (_PRINT_PAPER_MM and _PRINT_PAPER_MM[0] > 0) else 57.0
+    _k = (roll_w_mm * 72 / 25.4) / PAGE_W
+    c = canvas.Canvas(filepath, pagesize=(PAGE_W * _k, PAGE_H * _k))
+    c.scale(_k, _k)
+    font_name = "Helvetica-Bold"
+    for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+        if os.path.exists(f_cand):
+            try:
+                pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
+                font_name = "ReceiptArabic"
+                break
+            except Exception as _e: _log_silent("create_manual_receipt_pdf#1", _e)
+
+    def _ar(t):
+        try: return get_display(arabic_reshaper.reshape(str(t)))
+        except Exception: return str(t)
+
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1.2)
+    c.rect(4, 4, PAGE_W - 8, PAGE_H - 8)
+
+    c.setFont(font_name, 13)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 20, _ar("إيصال تحصيل يدوي"))
+
+    c.setLineWidth(0.8)
+    c.roundRect(PAGE_W / 2 - 55, PAGE_H - 36, 110, 14, 3, fill=False, stroke=True)
+    c.setFont(font_name, 8.5)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 33, _ar("معاملة يدوية - للمراجعة"))
+
+    c.line(10, PAGE_H - 42, PAGE_W - 10, PAGE_H - 42)
+
+    y = PAGE_H - 58
+    rows = [
+        ("وحدة المرور", unit_val if unit_val != "-" else "وحدة غير محددة"),
+        ("اسم المؤمن له", name_val),
+        ("رقم اللوحة", plate_val),
+        ("تاريخ العملية", op_dt.strftime("%d-%m-%Y")),
+        ("وقت الطباعة", op_dt.strftime("%H:%M %d-%m-%Y")),
+    ]
+
+    for lbl, val in rows:
+        c.setFont(font_name, 9)
+        c.setFillColorRGB(0, 0, 0)
+        c.drawRightString(PAGE_W - 10, y, _ar(lbl))
+        c.drawString(10, y, _ar(val))
+        c.setLineWidth(0.4)
+        c.setDash(2, 2)
+        c.line(8, y - 4, PAGE_W - 8, y - 4)
+        c.setDash()
+        y -= 20
+
+    box_height = 68
+    box_y = y - 56
+    c.setLineWidth(1.2)
+    c.rect(8, box_y, PAGE_W - 16, box_height, fill=False, stroke=True)
+
+    c.setFont(font_name, 8.5)
+    c.drawCentredString(PAGE_W / 2, box_y + box_height - 14, _ar("تنبيه: إيصال تحصيل يدوي مؤقت"))
+    c.setFont(font_name, 7.5)
+    c.drawCentredString(PAGE_W / 2, box_y + box_height - 24, _ar("(غير معتمد نهائياً - الدفع إلكتروني فيزا POS)"))
+
+    c.setLineWidth(0.6)
+    c.setDash(1, 2)
+    c.line(12, box_y + 32, PAGE_W - 12, box_y + 32)
+    c.setDash()
+
+    c.setFont(font_name, 9)
+    c.drawCentredString(PAGE_W / 2, box_y + 20, _ar("المبلغ المحصل:"))
+    c.setFont("Helvetica-Bold", 14)
+    c.drawCentredString(PAGE_W / 2, box_y + 6, f"{amt_val:,.2f} EGP")
+
+    c.save()
+
+SLIP_MARGIN_MM = 2       # المسافة بين إطار البون وحافة الورقة (مم). صغّرها لو عايز الإطار أقرب للحافة
+SLIP_TEXT_SCALE = 1.0    # تكبير/تصغير النصوص كلها (1.0 = المقاس الافتراضي الكبير)
+SLIP_LINE_FACTOR = 1.0   # ارتفاع السطر = حجم الخط × الرقم ده
+SLIP_GAP_FACTOR = 0.10   # المسافة بين الأسطر (نسبة من ارتفاع السطر). صغّرها/كبّرها لتقصير/تطويل الورقة
+SLIP_PAD_PT = 8          # مسافة بين الكلام وإطار البون من فوق وتحت (نقطة)
+SLIP_MAX_H_MM = 0        # حد أقصى لطول الورقة بالمم (0 = من غير حد)
+SLIP_OFFSET_X_MM = 0     # لو الطابعة بتزحزح البون: + يمين / - شمال
+SLIP_OFFSET_Y_MM = 0     # + لفوق / - لتحت
+SLIP_FONT_CANDIDATES = [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]
+
+def create_photocopy_slip_pdf(filepath, emp_name, unit_name, date_str, terminal_id=""):
+    """بون التصوير: عرض الورقة = عرض اللفة، وطولها بيتحسب من الكلام نفسه (ورقة صغيرة) والنصوص كبيرة تملا العرض."""
+    if not REPORTLAB_AVAILABLE:
+        return False
+    _pt = 72 / 25.4
+    SHEET_W = _PRINT_PAPER_MM[0] * _pt
+    font_name = "Helvetica-Bold"
+    for f_cand in SLIP_FONT_CANDIDATES:
+        if os.path.exists(f_cand):
+            try:
+                pdfmetrics.registerFont(TTFont("SlipArabic", f_cand))
+                font_name = "SlipArabic"
+                break
+            except Exception as _e: _log_silent("create_photocopy_slip_pdf#1", _e)
+
+    def _ar(t):
+        try: return get_display(arabic_reshaper.reshape(str(t)))
+        except Exception: return str(t)
+
+    m = SLIP_MARGIN_MM * _pt
+    fw = SHEET_W - 2 * m                             # عرض الإطار
+    inner_w = fw - 2 * 10
+    K = SLIP_TEXT_SCALE
+
+    def _fit_text(text, fn, base, min_single):
+        base, min_single = base * K, min_single * K
+        sz = base
+        while sz >= min_single:
+            if pdfmetrics.stringWidth(_ar(text), fn, sz) <= inner_w:
+                return [(_ar(text), fn, sz)]
+            sz -= 1
+        sz = min_single
+        rows, cur = [], ""
+        for w in str(text).split():
+            cand = (cur + " " + w).strip()
+            if cur and pdfmetrics.stringWidth(_ar(cand), fn, sz) > inner_w:
+                rows.append(cur)
+                cur = w
+            else:
+                cur = cand
+        if cur:
+            rows.append(cur)
+        out = []
+        for row in rows:
+            s_, txt = sz, _ar(row)
+            while s_ > 9 and pdfmetrics.stringWidth(txt, fn, s_) > inner_w:
+                s_ -= 1
+            out.append((txt, fn, s_))
+        return out
+
+    fitted = []
+    if emp_name:
+        fitted += _fit_text(emp_name, font_name, 34, 22)
+    if unit_name:
+        fitted += _fit_text(unit_name, font_name, 28, 20)
+    if terminal_id:
+        fitted += _fit_text(f"TID: {terminal_id}", "Helvetica-Bold", 26, 14)
+    fitted += _fit_text(str(date_str), "Helvetica-Bold", 26, 14)
+
+    # طول الورقة = الكلام + مسافات صغيرة بين الأسطر + هامش (ورقة صغيرة مش بتكبر)
+    heights = [sz * SLIP_LINE_FACTOR for _, _, sz in fitted]
+    n = len(fitted)
+    gap = (sum(heights) / n) * SLIP_GAP_FACTOR if n else 0
+    block_h = sum(heights) + gap * max(0, n - 1)
+    fh = block_h + 2 * SLIP_PAD_PT                   # ارتفاع الإطار
+    SHEET_H = fh + 2 * m
+    if SLIP_MAX_H_MM:
+        SHEET_H = min(SHEET_H, SLIP_MAX_H_MM * _pt)
+        fh = SHEET_H - 2 * m
+
+    c = canvas.Canvas(filepath, pagesize=(SHEET_W, SHEET_H))
+    ox, oy = SLIP_OFFSET_X_MM * _pt, SLIP_OFFSET_Y_MM * _pt
+    fx, fy = m + ox, m + oy
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(2.2)
+    c.roundRect(fx, fy, fw, fh, 12, stroke=1, fill=0)
+
+    cursor = fy + fh / 2 + block_h / 2
+    c.setFillColorRGB(0, 0, 0)
+    for (txt, fn, sz), h in zip(fitted, heights):
+        c.setFont(fn, sz)
+        c.drawCentredString(fx + fw / 2, cursor - sz * 0.9, txt)
+        cursor -= h + gap
+    c.save()
+    return True
+
+# ================= الوحدة المختارة في إيصال السمري (اجباري) + حفظها لليوم عشان تظهر في سمري الأرشيف =================
+def _day_iso_from_label(label):
+    """'11.11.2026' أو '11-11-2026' -> '2026-11-11' (أو None)."""
+    m = re.search(r"(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})", str(label or ""))
+    if not m: return None
+    try: return datetime.date(int(m.group(3)), int(m.group(2)), int(m.group(1))).isoformat()
+    except Exception: return None
+
+def summary_unit_save(day_iso, unit, tid):
+    try:
+        conn = db_connect()
+        try:
+            conn.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            conn.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES (?, ?)",
+                         (f"summary_unit:{day_iso}", json.dumps({"unit": unit, "tid": tid}, ensure_ascii=False)))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("summary_unit_save", e)
+
+def summary_unit_load(day_iso):
+    """بترجّع (اسم الوحدة، رقم الترمنل) المختارين لليوم ده، أو None لو مفيش."""
+    if not day_iso: return None
+    try:
+        conn = db_connect()
+        try:
+            row = conn.execute("SELECT meta_value FROM system_meta WHERE meta_key = ?", (f"summary_unit:{day_iso}",)).fetchone()
+        finally:
+            conn.close()
+        if not row: return None
+        d = json.loads(row[0])
+        if d.get("unit"): return d["unit"], d.get("tid", "")
+    except Exception as e:
+        _log_silent("summary_unit_load", e)
+    return None
+
+def _draw_summary_unit_block(c, font_name, ar, page_w, unit, tid, y0=58, h=114):
+    """مربع منفصل (بعيد عن باقي بيانات الإيصال) فيه اسم الوحدة المختارة ورقم الترمنل."""
+    if not unit: return
+    x0, w = 12, page_w - 24
+    c.saveState()
+    c.setStrokeColorRGB(0.15, 0.35, 0.55)
+    c.setLineWidth(1.2)
+    c.setDash(3, 2)
+    c.roundRect(x0, y0, w, h, 6, stroke=1, fill=0)
+    c.setDash()
+    c.setFont(font_name, 9)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(page_w / 2, y0 + h - 16, ar("الوحدة المختارة"))
+    txt, sz = ar(unit), 18
+    while sz > 9 and pdfmetrics.stringWidth(txt, font_name, sz) > w - 20: sz -= 1
+    c.setFont(font_name, sz)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 42, txt)
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.setLineWidth(0.6)
+    c.line(x0 + 10, y0 + h - 52, x0 + w - 10, y0 + h - 52)
+    c.setFont(font_name, 9)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(page_w / 2, y0 + h - 68, ar("رقم الترمنل"))
+    c.setFont("Helvetica-Bold", 17)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 92, str(tid) if tid else "-")
+    c.restoreState()
+
+
+# ================= v96: إيصال ملخص الفحص — دالة واحدة للرسم (البرنامج + الإضافة + الأرشيف)، عناوين عربي + إنجليزي لـ A2R-POS2 =================
+# كود لاتيني ثابت لكل وحدة (POS2 بيقرا إنجليزي وأرقام بس، فالاسم العربي مش بيوصله).
+UNIT_LATIN = {
+    "ابيس 1": "ABIS-1", "ابيس 2": "ABIS-2", "ابيس 3": "ABIS-3",
+    "برج العرب 1": "BORG-1", "برج العرب 2": "BORG-2", "برج العرب 3": "BORG-3", "برج العرب 4": "BORG-4",
+    "المنتزة 1": "MONTAZA-1", "المنتزة 2": "MONTAZA-2", "المنتزة 3": "MONTAZA-3",
+    "محرم بك 1": "MOHARRAM-1", "محرم بك 2": "MOHARRAM-2",
+    "العجمي 1": "AGAMY-1", "العجمي 2": "AGAMY-2",
+    "القبارى": "QABBARY", "مصطفى كامل": "MKAMEL", "مديرية الأمن": "AMN",
+    "ميناء الإسكندرية": "PORT", "مجمع خدمات مصر": "KHADAMAT",
+    "ابيس (احتياطي)": "ABIS-S", "برج العرب (احتياطي 1)": "BORG-S1", "برج العرب (احتياطي 2)": "BORG-S2",
+    "المنتزة (احتياطي)": "MONTAZA-S", "محرم بك (احتياطي)": "MOHARRAM-S", "العجمي (احتياطي)": "AGAMY-S",
+}
+
+
+def _summary_slip_font():
+    font_name = "Helvetica-Bold"
+    for f_cand in [r"C:\Windows\Fonts\arial.ttf", r"C:\Windows\Fonts\tahoma.ttf", r"C:\Windows\Fonts\seguiemj.ttf"]:
+        if os.path.exists(f_cand):
+            try:
+                pdfmetrics.registerFont(TTFont("ReceiptArabic", f_cand))
+                font_name = "ReceiptArabic"
+                break
+            except Exception as _e: _log_silent("summary_slip_font", _e)
+    return font_name
+
+
+def _draw_summary_unit_block_bi(c, font_name, ar, page_w, unit, tid, unit_code="", y0=52, h=130):
+    """نفس مربع «الوحدة المختارة» القديم بالظبط + عربي/إنجليزي + كود الوحدة اللاتيني تحت الاسم."""
+    if not unit: return
+    x0, w = 12, page_w - 24
+    c.saveState()
+    c.setStrokeColorRGB(0.15, 0.35, 0.55)
+    c.setLineWidth(1.2)
+    c.setDash(3, 2)
+    c.roundRect(x0, y0, w, h, 6, stroke=1, fill=0)
+    c.setDash()
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    _t = ar("الوحدة المختارة"); _e = "UNIT"
+    _wt = pdfmetrics.stringWidth(_t, font_name, 9); _we = pdfmetrics.stringWidth(_e, "Helvetica-Bold", 8)
+    _x = page_w / 2 + (_wt + 6 + _we) / 2
+    c.setFont(font_name, 9); c.drawRightString(_x, y0 + h - 16, _t)
+    c.setFont("Helvetica-Bold", 8); c.drawRightString(_x - _wt - 6, y0 + h - 16, _e)
+    txt, sz = ar(unit), 18
+    while sz > 9 and pdfmetrics.stringWidth(txt, font_name, sz) > w - 20: sz -= 1
+    c.setFont(font_name, sz)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 40, txt)
+    c.setFont("Helvetica-Bold", 12)
+    c.drawCentredString(page_w / 2, y0 + h - 56, unit_code or "-")
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.setLineWidth(0.6)
+    c.line(x0 + 10, y0 + h - 66, x0 + w - 10, y0 + h - 66)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    _t = ar("رقم الترمنل"); _e = "TID"
+    _wt = pdfmetrics.stringWidth(_t, font_name, 9); _we = pdfmetrics.stringWidth(_e, "Helvetica-Bold", 8)
+    _x = page_w / 2 + (_wt + 6 + _we) / 2
+    c.setFont(font_name, 9); c.drawRightString(_x, y0 + h - 82, _t)
+    c.setFont("Helvetica-Bold", 8); c.drawRightString(_x - _wt - 6, y0 + h - 82, _e)
+    c.setFont("Helvetica-Bold", 17)
+    c.setFillColorRGB(0, 0, 0)
+    c.drawCentredString(page_w / 2, y0 + h - 106, str(tid) if tid else "-")
+    c.restoreState()
+
+
+def render_summary_slip(pdf_path, *, title, subtitle, unit_label, date_label, total_count, pdf_count,
+                        manual_count, void_count, total_sum, chosen_unit="", chosen_tid="",
+                        total_label="إجمالي مبالغ السيستم:", footer_top="", footer_bottom="",
+                        show_date_row=True, big=True):
+    """الرسم الوحيد لإيصال ملخص الفحص (البرنامج + الإضافة + الأرشيف).
+    v96: نفس تصميم v95 بالظبط (نفس المربعات والترتيب والمقاسات) بس العناوين عربي + إنجليزي،
+    وكود الوحدة بالإنجليزي تحت اسمها، وكل رقم لسه في سطر لوحده (A2R-POS2 القديم بيقراه زي ما هو)."""
+    PAGE_W, PAGE_H = 226, 500
+    c = canvas.Canvas(pdf_path, pagesize=(PAGE_W, PAGE_H))
+    font_name = _summary_slip_font()
+
+    def _ar(txt):
+        try: return get_display(arabic_reshaper.reshape(str(txt)))
+        except Exception: return str(txt)
+
+    unit_code = UNIT_LATIN.get(str(chosen_unit or "").strip(), "")
+    c.setStrokeColorRGB(0.15, 0.35, 0.55)
+    c.setLineWidth(1.5)
+    c.rect(6, 6, PAGE_W - 12, PAGE_H - 12)
+
+    c.setFont(font_name, 15 if big else 14)
+    c.setFillColorRGB(0.05, 0.25, 0.55)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 32, _ar(title))
+    c.setFont("Helvetica-Bold", 12 if big else 11)
+    c.setFillColorRGB(0.15, 0.15, 0.15)
+    c.drawCentredString(PAGE_W / 2, PAGE_H - 52, subtitle)
+    c.setStrokeColorRGB(0.6, 0.6, 0.6)
+    c.line(14, PAGE_H - 64, PAGE_W - 14, PAGE_H - 64)
+
+    y = PAGE_H - 92
+    rows = [("وحدة المرور", "UNIT", unit_label)]
+    if show_date_row:
+        rows.append(("تاريخ التقرير", "DATE", date_label))
+    rows += [
+        ("إجمالي العمليات", "TOTAL", f"{int(total_count or 0):,}"),
+        ("إيصالات إلكترونية", "CARD", f"{int(pdf_count or 0):,}"),
+        ("معاملات يدوية", "MANUAL", f"{int(manual_count or 0):,}"),
+        ("معاملات ملغية", "VOID", f"{int(void_count or 0):,}"),
+    ]
+    lbl_sz, val_sz = (10, 11) if big else (9.5, 10.5)
+    for lbl, en, val in rows:
+        c.setFillColorRGB(0.94, 0.96, 0.98)
+        c.rect(12, y - 6, PAGE_W - 24, 24, fill=True, stroke=False)
+        c.setFont(font_name, lbl_sz)
+        c.setFillColorRGB(0.25, 0.25, 0.25)
+        t_ar = _ar(lbl)
+        c.drawRightString(PAGE_W - 18, y + 2, t_ar)
+        w_ar = pdfmetrics.stringWidth(t_ar, font_name, lbl_sz)
+        c.setFont("Helvetica-Bold", 7.5)
+        c.setFillColorRGB(0.3, 0.35, 0.45)
+        c.drawRightString(PAGE_W - 18 - w_ar - 5, y + 3, en)
+        c.setFont(font_name, val_sz)
+        c.setFillColorRGB(0.0, 0.0, 0.0)
+        c.drawString(18, y + 2, _ar(val))
+        y -= 30
+
+    # المربع الأخضر: نزل 4 نقط عشان مايغطيش آخر سطر (كان بيركب عليه في v95)
+    c.setFillColorRGB(0.08, 0.48, 0.28)
+    c.roundRect(12, y - 22, PAGE_W - 24, 46, 5, fill=True, stroke=False)
+    c.setFont(font_name, 11 if big else 10)
+    c.setFillColorRGB(1, 1, 1)
+    c.drawRightString(PAGE_W - 20, y + 4, _ar(total_label))
+    c.setFont("Helvetica-Bold", 7.5)
+    c.drawString(20, y + 5, "SYSTEM TOTAL")
+    c.setFont("Helvetica-Bold", 15 if big else 14)
+    c.drawCentredString(PAGE_W / 2, y - 13, f"{float(total_sum or 0):,.2f} EGP")
+
+    if chosen_unit:
+        _draw_summary_unit_block_bi(c, font_name, _ar, PAGE_W, chosen_unit, chosen_tid, unit_code)
+
+    c.setStrokeColorRGB(0.7, 0.7, 0.7)
+    c.line(14, 46, PAGE_W - 14, 46)
+    c.setFont("Helvetica", 8)
+    c.setFillColorRGB(0.35, 0.35, 0.35)
+    c.drawCentredString(PAGE_W / 2, 30, footer_top)
+    c.drawCentredString(PAGE_W / 2, 16, footer_bottom)
+    c.save()
+    return pdf_path
+
+
+# ================= فهرس الأرشيف + النسخة الاحتياطية المخفية + البحث العام =================
+ARCHIVE_BACKUP_DIR = os.path.join(DOCUMENTS_DIR, ".archive_backup")
+_ARCHIVE_LOCK = threading.Lock()
+
+def T2(ar, en):
+    return ar if CURRENT_LANG == "ar" else en
+
+def _hide_path(p):
+    """إخفاء المجلد على ويندوز (Hidden) — الاسم نفسه يبدأ بنقطة كمان."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+            ctypes.windll.kernel32.SetFileAttributesW(str(p), 0x02)
+    except Exception as e:
+        log_exception("hide_path", e)
+
+# ================= إضافة كروم المدمجة v2.0.0 (الشريط الجانبي + جسر محلي 127.0.0.1) =================
+CHROME_EXT_DIR = os.path.join(ARCHIVE_BACKUP_DIR, "A2R_Chrome_Extension")
+_EXT_ORIGINS = ("chrome-extension://", "extension://")  # v97: أصل صفحات الإضافة في كروم وإيدج
+LOCAL_BRIDGE_HOST = "127.0.0.1"
+LOCAL_BRIDGE_PORT = 47221
+
+_BRIDGE_TOKEN = None
+_BRIDGE_TOKEN_LOCK = threading.Lock()
+
+def bridge_token():
+    """v96: كود سري ثابت للجهاز ده بين البرنامج وإضافة كروم. بيتولد مرة واحدة ويتحفظ في قاعدة البيانات،
+    والبرنامج بيكتبه في config.js جوه فولدر الإضافة. أي طلب للجسر من غيره بيترفض."""
+    global _BRIDGE_TOKEN
+    with _BRIDGE_TOKEN_LOCK:
+        if _BRIDGE_TOKEN:
+            return _BRIDGE_TOKEN
+        tok = ""
+        try:
+            conn = db_connect()
+            try:
+                conn.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+                row = conn.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'bridge_token'").fetchone()
+                if row and row[0] and len(str(row[0])) >= 24:
+                    tok = str(row[0])
+                else:
+                    tok = secrets.token_urlsafe(32)
+                    conn.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('bridge_token', ?)", (tok,))
+                    conn.commit()
+            finally:
+                conn.close()
+        except Exception as e:
+            log_exception("bridge_token", e)
+        if not tok:
+            tok = secrets.token_urlsafe(32)   # لو قاعدة البيانات مش متاحة: كود للتشغيلة دي بس
+        _BRIDGE_TOKEN = tok
+        return tok
+
+def _bridge_safe_path(app, fpath, exts=(".pdf", ".txt", ".xlsx")):
+    """v96: الجسر بيفتح/يطبع بس ملفات جوه فولدر الإيصالات (والأرشيف اللي جواه) أو فولدر التقارير — مش أي مسار على الجهاز."""
+    try:
+        fpath = str(fpath or "").strip()
+        if not fpath or not fpath.lower().endswith(tuple(exts)):
+            return ""
+        real = os.path.realpath(fpath)
+        if not os.path.isfile(real):
+            return ""
+        roots = [getattr(app, "_watch_path", None) or DEFAULT_RECEIPTS_DIR, DEFAULT_RECEIPTS_DIR, DOCUMENTS_DIR]
+        nreal = os.path.normcase(real)
+        for r in roots:
+            if not r:
+                continue
+            rr = os.path.normcase(os.path.realpath(r))
+            try:
+                if os.path.commonpath([rr, nreal]) == rr:
+                    return real
+            except ValueError:
+                continue
+    except Exception as e:
+        _log_silent("bridge_safe_path", e)
+    return ""
+_CHROME_EXT_TEXT_FILES = {'manifest.json': '{\n  "manifest_version": 3,\n  "name": "A2R Operations Console",\n  "version": "2.9.6",\n  "description": "A2R Operations Console - Persistent Slim Resizable Sidebar (170px) & Offline Traffic Portal Manager",\n  "permissions": [\n    "tabs",\n    "alarms",\n    "sidePanel",\n    "activeTab",\n    "scripting",\n    "storage"\n  ],\n  "host_permissions": [\n    "http://127.0.0.1:47221/*"\n  ],\n  "action": {\n    "default_title": "A2R Operations Console",\n    "default_icon": {\n      "16": "icons/icon16.png",\n      "48": "icons/icon48.png",\n      "128": "icons/icon128.png"\n    }\n  },\n  "side_panel": {\n    "default_path": "sidepanel.html"\n  },\n  "content_scripts": [\n    {\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ],\n      "js": [\n        "content_sidebar.js"\n      ],\n      "run_at": "document_start"\n    }\n  ],\n  "web_accessible_resources": [\n    {\n      "resources": [\n        "sidepanel.html",\n        "sidepanel.css",\n        "sidepanel.js",\n        "icons/*"\n      ],\n      "matches": [\n        "http://*/*",\n        "https://*/*"\n      ]\n    }\n  ],\n  "background": {\n    "service_worker": "background.js"\n  },\n  "icons": {\n    "16": "icons/icon16.png",\n    "48": "icons/icon48.png",\n    "128": "icons/icon128.png"\n  }\n}\n', 'background.js': '// A2R Operations Console - Chrome Extension v2.9.6 (100% Offline)\n// v2.9.6: لغة الشريط بتتبع لغة البرنامج + أرقام الإجمالي والعمليات في النص\n// v2.9.5: آخر نشاط محفوظ في التخزين (كروم 115 بيقفل الخلفية بعد ~30 ثانية فكان العد بيتمسح)،\n//          تابات إيصالات البوابة (PDF) بتتقفل فعلاً لما تزيد عن الحد، وصفحات البوابة نفسها عمرها ما بتتقفل.\n// 1) Persistent resizable slim sidebar (132px) across ALL web tabs (state & width saved in chrome.storage.local)\n// 2) Auto-pin Traffic Portal tab & keep last 4 PDF receipt tabs\n// 3) 40-second IDLE auto-return to Traffic Portal (192.168.235.50)\n\nconst PORTAL_HOST = "192.168.235.50";\nconst DEFAULT_RECEIPT_LIMIT = 4;\nfunction receiptLimit(value) {\n  const n = Number(value);\n  return Number.isInteger(n) && [0,1,2,3,4,5,6,8,10].includes(n) ? n : DEFAULT_RECEIPT_LIMIT;\n}\nlet maxReceiptTabs = DEFAULT_RECEIPT_LIMIT;\nconst receiptLimitReady = new Promise(resolve => {\n  try {\n    chrome.storage.local.get({ a2r_receipt_limit: DEFAULT_RECEIPT_LIMIT }, res => {\n      maxReceiptTabs = receiptLimit(res.a2r_receipt_limit);\n      resolve();\n    });\n  } catch (_) { resolve(); }\n});\nchrome.storage.onChanged.addListener((changes, area) => {\n  if (area !== "local" || !changes.a2r_receipt_limit) return;\n  maxReceiptTabs = receiptLimit(changes.a2r_receipt_limit.newValue);\n  // Apply a changed cap to each window, preserving the existing exclusions.\n  chrome.tabs.query({}).then(tabs => {\n    for (const id of new Set(tabs.map(t => t.windowId))) maintainPinAndReceipts(id);\n  }).catch(() => {});\n});\nconst DEFAULT_IDLE_SEC = 40;\nlet idleReturnSec = DEFAULT_IDLE_SEC;\ntry {\n  chrome.storage.local.get({ a2r_idle_sec: DEFAULT_IDLE_SEC }, (res) => {\n    idleReturnSec = Number(res.a2r_idle_sec);\n    if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n  });\n  chrome.storage.onChanged.addListener((changes, area) => {\n    if (area === "local" && changes.a2r_idle_sec) {\n      idleReturnSec = Number(changes.a2r_idle_sec.newValue);\n      if (isNaN(idleReturnSec)) idleReturnSec = DEFAULT_IDLE_SEC;\n    }\n  });\n} catch (_) {}\nconst KEY_OPEN = "a2r_sidebar_open";\nconst KEY_WIDTH = "a2r_sidebar_width_v3";\n\nlet lastActivityTs = Date.now();\nlet returnedForCurrentIdle = false;\nlet activitySinceStart = false;\nconst KEY_LAST_ACT = "a2r_last_activity_ts";\nconst KEY_RETURNED = "a2r_idle_returned";\n// قراية آخر نشاط محفوظ (بدل ما يتصفّر كل ما الخلفية تصحى من جديد)\nconst idleStateReady = new Promise(resolve => {\n  try {\n    chrome.storage.local.get({ [KEY_LAST_ACT]: 0, [KEY_RETURNED]: false }, res => {\n      const ts = Number(res[KEY_LAST_ACT]) || 0;\n      if (!activitySinceStart) {\n        if (ts > 0 && ts <= Date.now()) lastActivityTs = ts;\n        returnedForCurrentIdle = !!res[KEY_RETURNED];\n      }\n      resolve();\n    });\n  } catch (_) { resolve(); }\n});\nlet lastSavedAct = 0;\nfunction saveIdleState(force = false) {\n  try {\n    const now = Date.now();\n    if (!force && now - lastSavedAct < 1500) return;\n    lastSavedAct = now;\n    chrome.storage.local.set({ [KEY_LAST_ACT]: lastActivityTs, [KEY_RETURNED]: returnedForCurrentIdle });\n  } catch (_) {}\n}\n// v2.9.5: تاب الـ PDF بيرجع للبوابة بنفس الثواني المختارة (زي النسخة القديمة)\nfunction isPdfLikeTab(tab) {\n  const u = getTabUrl(tab);\n  return u.endsWith(".pdf") || u.includes(".pdf?") || u.includes(".pdf#") || u.includes("quote_receipt") ||\n    u.includes("127.0.0.1:47221/api/pdf") || u.startsWith("blob:") || u.startsWith("data:application/pdf");\n}\n\ntry {\n  if (chrome.sidePanel && chrome.sidePanel.setPanelBehavior) {\n    chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false }).catch(() => {});\n  }\n} catch (_) {}\n\n// v2.9.6: نفس الإضافة شغالة على Edge كمان. لو Edge مافيهوش اللوحة الجانبية، الشريط بيفتح في شباك صغير\nconst IS_EDGE = /\\bEdg\\//.test(navigator.userAgent || "");\nfunction openSidePanel(windowId) {\n  try {\n    if (chrome.sidePanel && chrome.sidePanel.open && windowId !== undefined) {\n      chrome.sidePanel.open({ windowId }).catch(() => {});\n      return;\n    }\n    if (IS_EDGE && chrome.windows && chrome.windows.create) {\n      chrome.windows.create({ url: chrome.runtime.getURL("sidepanel.html"), type: "popup", width: 240, height: 720 }).catch(() => {});\n    }\n  } catch (_) {}\n}\n\nfunction getTabUrl(tab) {\n  return ((tab && (tab.url || tab.pendingUrl)) || "").toLowerCase();\n}\n\nfunction canInjectSlimSidebar(tab) {\n  const u = getTabUrl(tab);\n  if (!u.startsWith("http://") && !u.startsWith("https://")) return false;\n  if (u.startsWith("https://chrome.google.com/webstore") || u.startsWith("https://chromewebstore.google.com")) return false;\n  if (u.startsWith("https://microsoftedge.microsoft.com/addons")) return false;\n  if (u.endsWith(".pdf") || u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return false;\n  return true;\n}\n\nchrome.action.onClicked.addListener((tab) => {\n  if (!tab || tab.id === undefined) return;\n  markUserActive();\n\n  if (!canInjectSlimSidebar(tab)) {\n    openSidePanel(tab.windowId);\n    return;\n  }\n\n  chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 0 }, (res) => {\n    // v92: الضغط على أيقونة الإضافة يفتح الشريط دائمًا (الإغلاق من زر ✕ فقط)\n    const nextOpen = true;\n    const savedWidth = res[KEY_WIDTH] || 0;\n    chrome.storage.local.set({ [KEY_OPEN]: nextOpen });\n\n    chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth }).catch(async () => {\n      try {\n        await chrome.scripting.executeScript({\n          target: { tabId: tab.id },\n          files: ["content_sidebar.js"],\n        });\n        await chrome.tabs.sendMessage(tab.id, { type: "A2R_SET_SIDEBAR", open: nextOpen, width: savedWidth });\n      } catch (_) {\n        openSidePanel(tab.windowId);\n      }\n    });\n  });\n});\n\nfunction isPortalTab(tab) {\n  const u = getTabUrl(tab);\n  if (!u.includes(PORTAL_HOST)) return false;\n  if (u.includes("quote_receipt") || u.includes(".pdf") || u.startsWith("blob:") || u.includes("receipt")) {\n    return false;\n  }\n  return true;\n}\n\nfunction isProtectedChromePage(tab) {\n  const u = getTabUrl(tab);\n  return u.startsWith("chrome://extensions") || u.startsWith("chrome://settings") ||\n    u.startsWith("edge://extensions") || u.startsWith("edge://settings");\n}\n\nfunction isReceiptPdfTab(tab, portalTabIds) {\n  if (!tab || tab.pinned) return false;\n  const u = getTabUrl(tab);\n  if (!u) return false;\n  if (isPortalTab(tab)) return false;\n  // v2.9.5: قبل كده أي رابط فيه 192.168 كان بيتساب، فإيصالات البوابة عمرها ما اتقفلت والحد ماكانش بيشتغل.\n  // دلوقتي: صفحات البوابة (أي حاجة مش PDF) عمرها ما بتتقفل، وإيصالات الـ PDF بس هي اللي بتتقفل لما تزيد عن الحد.\n  const isPdf = isPdfLikeTab(tab);\n  if (u.includes("192.168") && !isPdf) return false;\n\n  if (u.includes("quote_receipt") || u.includes("127.0.0.1:47221/api/pdf")) return true;\n  if (u.includes(PORTAL_HOST) && isPdf) {\n    return true;\n  }\n  if (\n    tab.openerTabId &&\n    portalTabIds.has(tab.openerTabId) &&\n    (u.includes(".pdf") || u.startsWith("blob:") || u.startsWith("data:application/pdf"))\n  ) {\n    return true;\n  }\n  return false;\n}\n\nfunction markUserActive() {\n  activitySinceStart = true;\n  lastActivityTs = Date.now();\n  const wasReturned = returnedForCurrentIdle;\n  returnedForCurrentIdle = false;\n  saveIdleState(wasReturned);\n}\n\nasync function maintainPinAndReceipts(windowId) {\n  try {\n    await receiptLimitReady;\n    if (maxReceiptTabs === 0) return;\n    const tabs = await chrome.tabs.query({ windowId });\n    const portalTabs = tabs.filter(isPortalTab);\n    const portalTabIds = new Set(portalTabs.map((t) => t.id));\n    // v93: لا يتم تثبيت تبويب البوابة بعد الآن\n    const receiptTabs = tabs\n      .filter((t) => isReceiptPdfTab(t, portalTabIds))\n      .sort((a, b) => a.id - b.id);\n    if (receiptTabs.length > maxReceiptTabs) {\n      const toClose = receiptTabs.slice(0, receiptTabs.length - maxReceiptTabs);\n      for (const oldTab of toClose) {\n        chrome.tabs.remove(oldTab.id).catch(() => {});\n      }\n    }\n  } catch (_) {}\n}\n\nlet idleSettingReady = null;\nasync function checkIdleAndReturnToPortal() {\n  try {\n    await idleStateReady;\n    if (!idleSettingReady) {\n      idleSettingReady = new Promise(resolve => {\n        try {\n          chrome.storage.local.get({ a2r_idle_sec: DEFAULT_IDLE_SEC }, res => {\n            const v = Number(res.a2r_idle_sec);\n            idleReturnSec = isNaN(v) ? DEFAULT_IDLE_SEC : v;\n            resolve();\n          });\n        } catch (_) { resolve(); }\n      });\n    }\n    await idleSettingReady;\n    if (returnedForCurrentIdle) return;\n    if (!idleReturnSec) return;\n    const idleSec = (Date.now() - lastActivityTs) / 1000;\n    if (idleSec < idleReturnSec) { scheduleAlarmAt(lastActivityTs + idleReturnSec * 1000); return; }\n\n    let activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });\n    if (!activeTabs || !activeTabs.length) {\n      activeTabs = await chrome.tabs.query({ active: true });\n    }\n    if (!activeTabs || !activeTabs.length) return;\n\n    const curTab = activeTabs[0];\n    if (!curTab || isPortalTab(curTab) || isProtectedChromePage(curTab)) return;\n\n    let winTabs = await chrome.tabs.query({ windowId: curTab.windowId });\n    let portal = winTabs.find(isPortalTab);\n\n    if (portal) {\n      if (!portal.active) {\n        returnedForCurrentIdle = true;\n        saveIdleState(true);\n        await chrome.tabs.update(portal.id, { active: true });\n      }\n      return;\n    }\n\n    const allTabs = await chrome.tabs.query({});\n    portal = allTabs.find(isPortalTab);\n    if (portal && portal.id !== curTab.id) {\n      returnedForCurrentIdle = true;\n      saveIdleState(true);\n      if (portal.windowId !== undefined) {\n        await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n      }\n      await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n    }\n  } catch (_) {}\n}\n\nsetInterval(checkIdleAndReturnToPortal, 2000);\n\nfunction scheduleAlarmAt(whenMs) {\n  try {\n    chrome.alarms.create("a2r_idle_check", { when: Math.max(Date.now() + 1000, whenMs + 300) });\n  } catch (_) {}\n}\n\nfunction scheduleAlarmFallback() {\n  try {\n    if (!idleReturnSec) return;\n    scheduleAlarmAt(Date.now() + idleReturnSec * 1000);\n  } catch (_) {}\n}\n\n// شبكة أمان: منبّه كل دقيقة يصحّي الخلفية ويراجع (لو المنبّه القصير اتأخر)\ntry { chrome.alarms.create("a2r_idle_tick", { periodInMinutes: 1 }); } catch (_) {}\n\nchrome.alarms.onAlarm.addListener((alarm) => {\n  if (alarm && (alarm.name === "a2r_idle_check" || alarm.name === "a2r_idle_tick")) {\n    checkIdleAndReturnToPortal();\n  }\n});\n\nconst EXT_ORIGIN = (() => { try { return new URL(chrome.runtime.getURL("/")).origin; } catch (_) { return ""; } })();\nfunction fromExtensionPage(sender) {\n  return !!(sender && sender.url && EXT_ORIGIN && sender.url.startsWith(EXT_ORIGIN));\n}\n\nchrome.runtime.onMessage.addListener((msg, sender) => {\n  if (!msg) return;\n  if (msg.type === "A2R_USER_ACTIVITY") {\n    markUserActive();\n    scheduleAlarmFallback();\n  } else if (msg.type === "A2R_IDLE_DUE") {\n    checkIdleAndReturnToPortal();\n  } else if (msg.type === "A2R_GOTO_PORTAL") {\n    (async () => {\n      try {\n        const all = await chrome.tabs.query({});\n        const portal = all.find(isPortalTab);\n        if (portal) {\n          if (portal.windowId !== undefined) await chrome.windows.update(portal.windowId, { focused: true }).catch(() => {});\n          await chrome.tabs.update(portal.id, { active: true }).catch(() => {});\n        } else {\n          await chrome.tabs.create({ url: "http://" + PORTAL_HOST + "/" }).catch(() => {});\n        }\n      } catch (_) {}\n    })();\n  } else if (msg.type === "A2R_OPEN_TAB" && msg.url) {\n    // v2.9.5: بنفتح بس روابط إيصالات البرنامج، وبطلب من الشريط نفسه\n    const u = String(msg.url);\n    if (fromExtensionPage(sender) && u.startsWith("http://127.0.0.1:47221/api/pdf?")) {\n      chrome.tabs.create({ url: u }).catch(() => {});\n    }\n  }\n});\n\nchrome.tabs.onCreated.addListener((tab) => {\n  if (!tab) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n});\n\nchrome.tabs.onActivated.addListener((activeInfo) => {\n  if (!activeInfo) return;\n  markUserActive();\n  scheduleAlarmFallback();\n  if (activeInfo.windowId !== undefined) maintainPinAndReceipts(activeInfo.windowId);\n});\n\nchrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {\n  if (!tab) return;\n  if (changeInfo.status === "complete" || changeInfo.url) {\n    if (tab.windowId !== undefined) maintainPinAndReceipts(tab.windowId);\n  }\n});\n', 'sidepanel.html': '<!DOCTYPE html>\n<html lang="ar" dir="rtl">\n<head>\n  <meta charset="UTF-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n  <title>A2R Operations Console</title>\n  <link rel="stylesheet" href="sidepanel.css">\n</head>\n<body>\n  <header class="topbar">\n    <div class="brand">\n      <span class="logo">A2R</span>\n      <span id="connBadge" class="badge offline">● مغلق</span>\n    </div>\n    <div class="top-actions">\n      <button id="btnPinSite" class="icon-btn hidden" title="تشغيل الإضافة تلقائيًا على هذا الموقع">📍</button>\n      <button id="btnTopOpenApp" class="icon-btn" title="إظهار البرنامج">🖥️</button>\n      <button id="btnCloseSlim" class="icon-btn close-btn hidden" title="إغلاق">✕</button>\n    </div>\n  </header>\n\n  <nav class="tabs">\n    <button class="tab-btn active" data-tab="home">الرئيسية</button>\n    <button class="tab-btn" data-tab="records">السجلات</button>\n    <button class="tab-btn" data-tab="archive">الأرشيف</button>\n  </nav>\n\n  <div id="toast" class="toast hidden"></div>\n\n  <main class="content">\n    <!-- TAB 1: HOME -->\n    <section id="tab-home" class="tab-pane active">\n      <div class="stack">\n        <div class="kpi-card green">\n          <div class="kpi-title">إجمالي السيستم</div>\n          <div id="kpiSum" class="kpi-val green-txt">0.00</div>\n        </div>\n\n        <div class="kpi-card blue">\n          <div class="kpi-title">عدد العمليات</div>\n          <div id="kpiCount" class="kpi-val">0</div>\n        </div>\n\n        <div class="kpi-mini-stack hidden" aria-hidden="true">\n          <div class="mini-line"><span>مطبوع اليوم</span><strong id="kpiPrinted">0</strong></div>\n          <div class="mini-line"><span>ملغي</span><strong id="kpiVoid">0</strong></div>\n          <div class="mini-line"><span>مكرر</span><strong id="kpiDup">0</strong></div>\n        </div>\n\n        <!-- الأزرار بالترتيب المطلوب -->\n        <button id="btnScan" class="btn primary full">⚡ فحص اليوم</button>\n        <div id="scanProg" class="scan-prog hidden"><div id="scanProgFill" class="scan-prog-fill"></div><span id="scanProgPct" class="scan-prog-pct">0%</span></div>\n\n        <button id="btnSummaryPdf" class="btn neutral full">📄 ملخص الفحص PDF</button>\n        <div id="summaryBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">اختر الوحدة للملخص</span>\n            <button id="btnSumCancel" class="chip-btn">✕</button>\n          </div>\n          <select id="sumUnit" class="input full mt-4"></select>\n          <div id="sumTid" class="hint mt-4">الماكينة: —</div>\n          <button id="btnSumPrint" class="btn primary full mt-4">📄 فتح الملخص PDF</button>\n        </div>\n\n        <button id="btnQuickManual" class="btn neutral full">➕ معاملة يدوية</button>\n        <div id="manualBox" class="card compact hidden">\n          <div class="row-between">\n            <span class="card-title">معاملة يدوية PDF</span>\n            <button id="btnManualCancel" class="chip-btn">✕</button>\n          </div>\n          <input id="mAmount" type="number" step="0.01" placeholder="المبلغ + Enter *" class="input full mt-4">\n          <input id="mName" type="text" placeholder="اسم المؤمن له (اختياري)" class="input full mt-4">\n          <input id="mPlate" type="text" placeholder="رقم اللوحة (اختياري)" class="input full mt-4">\n          <select id="mUnit" class="input full mt-4"></select>\n          <button id="btnAddManual" class="btn primary full mt-4">توليد وطباعة (Enter)</button>\n        </div>\n\n        <button id="btnViewRecords" class="btn neutral full">🔍 عرض السجل</button>\n\n        <button id="btnReprintLast" class="btn neutral full">🖨️ طباعة الأخير</button>\n\n        <div id="archStatus" class="arch-pill">—</div>\n\n        <div id="rowSide" class="settings-row hidden">\n          <span>مكان الشريط</span>\n          <select id="selSide" class="input"><option value="right">يمين</option><option value="left">شمال</option></select>\n        </div>\n        <div class="settings-row">\n          <span>الرجوع التلقائي</span>\n          <select id="selIdle" class="input">\n            <option value="0">إيقاف</option>\n            <option value="5">5 ثانية</option>\n            <option value="10">10 ثانية</option>\n            <option value="15">15 ثانية</option>\n            <option value="20">20 ثانية</option>\n            <option value="25">25 ثانية</option>\n            <option value="30">30 ثانية</option>\n            <option value="35">35 ثانية</option>\n            <option value="40">40 ثانية</option>\n            <option value="45">45 ثانية</option>\n            <option value="50">50 ثانية</option>\n            <option value="55">55 ثانية</option>\n            <option value="60">60 ثانية</option>\n          </select>\n        </div>\n        <div class="settings-row">\n          <span>الإيصالات المفتوحة</span>\n          <select id="selReceiptLimit" class="input"><option value="0">إيقاف الإغلاق</option><option value="1">1</option><option value="2">2</option><option value="3">3</option><option value="4">4</option><option value="5">5</option><option value="6">6</option><option value="8">8</option><option value="10">10</option></select>\n        </div>\n      </div>\n    </section>\n\n    <!-- TAB 2: RECORDS -->\n    <section id="tab-records" class="tab-pane">\n      <div class="card compact">\n        <input id="recSearch" type="text" placeholder="بحث اسم، لوحة، شاسيه، مبلغ..." class="input full">\n        <select id="recFilter" class="input full mt-4">\n          <option value="all">كل الحالات</option>\n          <option value="ok">سليم</option>\n          <option value="manual">يدوي</option>\n          <option value="dup">مكرر</option>\n          <option value="void">ملغي</option>\n        </select>\n        <div id="recStats" class="hint mt-4">0 سجل</div>\n      </div>\n      <div id="recList" class="list-box"></div>\n    </section>\n\n    <!-- TAB 3: ARCHIVE -->\n    <section id="tab-archive" class="tab-pane">\n      <div class="card compact">\n        <input id="archQuery" type="text" placeholder="بحث في الأرشيف..." class="input full">\n        <button id="btnArchSearch" class="btn primary full mt-4">🔎 بحث</button>\n        <div id="archAuthRow" class="mt-4">\n          <input id="archPwd" type="password" placeholder="كلمة مرور المشرف" class="input full">\n          <button id="btnArchUnlock" class="btn neutral full mt-4">دخول المشرف</button>\n        </div>\n        <div id="archRoleHint" class="hint mt-4">آخر 7 أيام (للمشرف: الكل)</div>\n      </div>\n      <div id="archResults" class="list-box"></div>\n    </section>\n  </main>\n\n  <footer class="footer">\n    <span id="footVer">A2R • Ahmed Ramadan</span>\n  </footer>\n\n  <script src="config.js"></script>\n  <script src="sidepanel.js"></script>\n</body>\n</html>\n', 'sidepanel.css': '* { box-sizing: border-box; margin: 0; padding: 0; }\n:root {\n  --bg: #202124;\n  --surface: #292A2D;\n  --surface-hover: #35363A;\n  --input: #171717;\n  --border: #3C4043;\n  --text: #E8EAED;\n  --muted: #9AA0A6;\n  --accent: #8AB4F8;\n  --accent-bg: #1A73E8;\n  --accent-bg-h: #1B66C9;\n  --green: #81C995;\n  --warn: #FDD663;\n  --danger: #F28B82;\n}\nbody {\n  font-family: "Segoe UI", Roboto, Tahoma, sans-serif;\n  background: var(--bg);\n  color: var(--text);\n  font-size: 11px;\n  display: flex;\n  flex-direction: column;\n  height: 100vh;\n  overflow: hidden;\n  -webkit-font-smoothing: antialiased;\n}\n.topbar {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  padding: 6px 6px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.brand { display: flex; align-items: center; gap: 5px; }\n.logo { font-size: 12px; font-weight: 700; color: var(--text); letter-spacing: 0.4px; }\n.badge { font-size: 8.5px; font-weight: 600; padding: 1px 5px; border-radius: 99px; }\n.badge.online { background: rgba(129, 201, 149, 0.14); color: var(--green); }\n.badge.offline { background: rgba(242, 139, 130, 0.14); color: var(--danger); }\n.top-actions { display: flex; gap: 3px; }\n.icon-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 50%; width: 22px; height: 22px; cursor: pointer; font-size: 10.5px;\n  display: flex; align-items: center; justify-content: center; transition: background 0.15s;\n}\n.icon-btn:hover { background: var(--surface-hover); color: var(--text); }\n.icon-btn.close-btn:hover { background: rgba(242, 139, 130, 0.18); color: var(--danger); }\n\n.tabs {\n  display: grid;\n  grid-template-columns: repeat(3, 1fr);\n  gap: 3px;\n  padding: 5px 5px;\n  background: var(--bg);\n  border-bottom: 1px solid var(--border);\n}\n.tab-btn {\n  background: transparent; color: var(--muted); border: 1px solid transparent;\n  border-radius: 14px; padding: 5px 2px; font-weight: 600; font-size: 10px; cursor: pointer;\n  transition: background 0.15s, color 0.15s;\n}\n.tab-btn:hover { background: var(--surface); color: var(--text); }\n.tab-btn.active {\n  background: rgba(138, 180, 248, 0.16);\n  color: var(--accent);\n  border-color: rgba(138, 180, 248, 0.35);\n}\n\n.content { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 5px; }\n.content::-webkit-scrollbar { width: 4px; }\n.content::-webkit-scrollbar-thumb { background: #4A4D51; border-radius: 4px; }\n.tab-pane { display: none; }\n.tab-pane.active { display: block; }\n\n.stack { display: flex; flex-direction: column; gap: 6px; }\n.hidden { display: none !important; }\n\n.card {\n  background: var(--surface); border: 1px solid var(--border);\n  border-radius: 8px; padding: 7px 6px; margin-bottom: 6px;\n}\n.card.compact { padding: 6px; }\n.card-title { font-size: 10px; font-weight: 600; color: var(--accent); }\n.hint { font-size: 8.5px; color: var(--muted); }\n.center { text-align: center; }\n\n.row-between { display: flex; align-items: center; justify-content: space-between; }\n.full { width: 100%; }\n.mt-4 { margin-top: 5px; }\n\n.input {\n  background: var(--input); color: var(--text); border: 1px solid var(--border);\n  border-radius: 6px; padding: 6px 6px; font-size: 10px; outline: none; width: 100%;\n  transition: border-color 0.15s;\n}\n.input:focus { border-color: var(--accent); }\n.input::placeholder { color: #7F868C; }\n\n/* أزرار بنمط جوجل كروم الداكن */\n.btn {\n  border: 1px solid var(--border); border-radius: 18px; padding: 8px 6px; min-height: 34px;\n  color: var(--text); font-weight: 600; font-size: 10.5px; line-height: 1.25;\n  cursor: pointer; text-align: center; display: flex; align-items: center;\n  justify-content: center; gap: 4px; word-break: break-word;\n  transition: background 0.15s, border-color 0.15s;\n}\n.btn.primary {\n  background: var(--accent-bg); border-color: var(--accent-bg); color: #FFFFFF;\n}\n.btn.primary:hover { background: var(--accent-bg-h); border-color: var(--accent-bg-h); }\n.btn.neutral { background: var(--surface); color: var(--text); }\n.btn.neutral:hover { background: var(--surface-hover); border-color: #5F6368; }\n.btn:disabled { opacity: 0.5; cursor: not-allowed; }\n\n.chip-btn {\n  background: var(--surface-hover); color: var(--text); border: 1px solid var(--border);\n  border-radius: 12px; padding: 1px 6px; font-size: 9px; font-weight: 600; cursor: pointer;\n}\n.chip-btn:hover { border-color: var(--accent); color: var(--accent); }\n\n.kpi-card {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 7px;\n}\n.kpi-title { font-size: 9px; color: var(--muted); font-weight: 600; }\n.kpi-val { font-size: 15px; font-weight: 700; margin-top: 2px; direction: ltr; text-align: right; color: var(--text); }\n.green-txt { color: var(--green); }\n\n.kpi-mini-stack {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 7px; display: flex; flex-direction: column; gap: 3px; font-size: 9.5px;\n}\n.mini-line { display: flex; justify-content: space-between; color: var(--muted); }\n.mini-line strong { color: var(--text); font-weight: 600; }\n\n.arch-pill {\n  background: transparent; border: 1px solid var(--border); border-radius: 8px;\n  padding: 5px 4px; font-size: 8.5px; font-weight: 600; text-align: center; color: var(--green);\n}\n\n.match-result { font-size: 9.5px; font-weight: 600; margin-top: 4px; min-height: 12px; }\n.match-ok { color: var(--green); }\n.match-short { color: var(--danger); }\n.match-extra { color: var(--warn); }\n\n.list-box { display: flex; flex-direction: column; gap: 5px; }\n.rec-item {\n  background: var(--surface); border: 1px solid var(--border); border-radius: 8px;\n  padding: 6px 5px; border-right: 3px solid var(--accent);\n}\n.rec-item.kind-dup { background: rgba(242, 139, 130, 0.12); border-right-color: var(--danger); }\n.rec-item.kind-void { background: rgba(197, 138, 249, 0.12); border-right-color: #C58AF9; }\n.rec-item.kind-manual { background: rgba(138, 180, 248, 0.1); border-right-color: var(--accent); }\n.rec-item.kind-missing, .rec-item.kind-wrong { background: rgba(253, 214, 99, 0.1); border-right-color: var(--warn); }\n\n.rec-top { display: flex; justify-content: space-between; align-items: center; font-weight: 600; font-size: 9.5px; gap: 3px; }\n.rec-amt { color: var(--green); font-size: 10px; white-space: nowrap; }\n.rec-item.kind-void .rec-amt { color: #D7AEFB; text-decoration: line-through; }\n.rec-meta { font-size: 8.5px; color: var(--muted); margin-top: 2px; line-height: 1.3; word-break: break-word; }\n.rec-actions { display: flex; flex-direction: column; gap: 3px; margin-top: 5px; }\n.rec-actions button {\n  width: 100%; padding: 4px 4px; font-size: 9.5px; border-radius: 12px; border: 1px solid var(--border);\n  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;\n}\n.rec-actions button:hover { background: var(--surface-hover); border-color: var(--accent); }\n.rec-actions button.btn-v { color: var(--danger); }\n.rec-actions button.btn-r { color: var(--green); }\n\n.denom-stack { display: flex; flex-direction: column; gap: 3px; }\n.denom-item { display: flex; align-items: center; gap: 3px; font-size: 9.5px; }\n.denom-item span { width: 32px; color: var(--muted); font-weight: 600; }\n.denom-item input { flex: 1; text-align: center; padding: 3px 2px; }\n.cash-summary {\n  background: var(--input); border: 1px solid var(--border); border-radius: 6px;\n  padding: 5px; font-size: 9.5px; display: flex; flex-direction: column; gap: 2px;\n}\n\n.toast {\n  position: fixed; bottom: 24px; left: 5px; right: 5px; z-index: 99;\n  background: #303134; color: var(--text); border: 1px solid var(--border);\n  box-shadow: 0 2px 8px rgba(0,0,0,0.45);\n  border-radius: 8px; padding: 6px 6px; font-size: 9.5px; font-weight: 600; text-align: center;\n}\n\n.footer {\n  padding: 4px 5px; background: var(--bg); border-top: 1px solid var(--border);\n  text-align: center; font-size: 8.5px; color: var(--muted); font-weight: 500;\n}\n\n/* تكيف تلقائي عند تكبير عرض الشريط الجانبي بالسحب */\n@media (min-width: 210px) {  /* لوحة كروم الجانبية فقط (body.sp)؛ الشريط الملصوق يكبر بالـzoom */\n  body.sp { font-size: 12px; }\n  body.sp .logo { font-size: 13.5px; }\n  body.sp .badge { font-size: 10px; padding: 2px 7px; }\n  body.sp .tab-btn { font-size: 11px; padding: 6px 4px; }\n  body.sp .kpi-title { font-size: 10.5px; }\n  body.sp .kpi-val { font-size: 19px; }\n  body.sp .btn { font-size: 11.5px; min-height: 36px; padding: 9px 10px; }\n  body.sp .input { font-size: 11.5px; padding: 7px 8px; }\n  body.sp .rec-top { font-size: 11.5px; }\n  body.sp .rec-amt { font-size: 12px; }\n  body.sp .rec-meta { font-size: 10px; }\n  body.sp .rec-actions { flex-direction: row; }\n}\n\n/* v2.8: شريط تقدم الفحص + صف سبب الإلغاء + صف الإعدادات + زر تثبيت الموقع */\n.scan-prog { position: relative; background: var(--input); border: 1px solid var(--border); border-radius: 99px; height: 14px; overflow: hidden; }\n.scan-prog-fill { height: 100%; width: 0%; background: var(--accent-bg); transition: width 0.3s ease; }\n.scan-prog-pct { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 8.5px; font-weight: 700; color: var(--text); direction: ltr; }\n.settings-row { display: flex; align-items: center; justify-content: space-between; gap: 5px; font-size: 9px; color: var(--muted); font-weight: 600; padding: 2px 1px; }\n.settings-row select { width: auto; padding: 3px 4px; }\n.icon-btn.pinned { color: var(--accent); border-color: rgba(138,180,248,0.4); }\n.void-row { display: flex; flex-direction: column; gap: 3px; margin-top: 4px; }\n.void-row .void-btns { display: flex; gap: 3px; }\n.void-row .void-btns button { flex: 1; padding: 4px 2px; font-size: 9px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; }\n.void-row .void-btns button.btn-confirm { color: var(--danger); }\n.void-row .void-btns button:hover { background: var(--surface-hover); border-color: var(--accent); }\n\n/* v91: زر البوابة الكبير (التبويب المثبّت في كروم صغير بطبيعته، فده بديل واضح وسهل الضغط) */\n.btn.portal {\n  background: #F9AB00; border-color: #F9AB00; color: #202124; font-weight: 800;\n  font-size: 13px; min-height: 44px; border-radius: 12px; margin: 5px 5px 0; width: calc(100% - 10px);\n  box-shadow: 0 0 0 2px rgba(249,171,0,0.25);\n}\n.btn.portal:hover { background: #FBBC04; border-color: #FBBC04; }\n.btn.portal:active { transform: scale(0.98); }\n.settings-row { font-size: 10px; }\n.settings-row select { font-size: 10.5px; min-height: 26px; }\n\n/* v2.9.6: الإجمالي وعدد العمليات في نص الخانة */\n.kpi-card { text-align: center; }\n.kpi-val { text-align: center; }\n', 'sidepanel.js': 'const API = "http://127.0.0.1:47221";\n// v2.9.5: كود سري بين الإضافة والبرنامج (البرنامج بيكتبه في config.js لما يفك الإضافة). من غيره البرنامج بيرفض أي طلب.\nconst BRIDGE_TOKEN = (typeof A2R_BRIDGE_TOKEN === "string") ? A2R_BRIDGE_TOKEN : "";\nlet SUP_KEY = "";   // مفتاح المشرف للشريط ده بس (بيخلص لوحده بعد شوية)\nfunction bridgeHeaders(extra = {}) {\n  const h = Object.assign({ "X-A2R-Token": BRIDGE_TOKEN }, extra);\n  if (SUP_KEY) h["X-A2R-Sup"] = SUP_KEY;\n  return h;\n}\nconst IS_SLIM = new URLSearchParams(location.search).get("mode") === "slim";\n\nlet state = {\n  connected: false,\n  systemSum: 0,\n  records: [],\n  units: [],\n  terminals: {},\n  isSupervisor: false,\n  metaLoaded: false,\n  initialSynced: false,\n  isProcessing: false,\n};\n\nconst $ = (id) => document.getElementById(id);\n\n// v2.9.6: لغة الشريط بتتبع لغة البرنامج (عربي / English) — البرنامج بيبعتها في /api/status\nconst EN = {\n  "● متصل": "● Connected", "● مغلق": "● Closed",\n  "تشغيل الإضافة تلقائيًا على هذا الموقع": "Auto-run the extension on this site",\n  "الإضافة تعمل دائمًا على بوابة المرور": "The extension always runs on the traffic portal",\n  "الإضافة مثبتة على هذا الموقع — اضغط للإيقاف": "Extension pinned on this site — click to stop",\n  "إظهار البرنامج": "Show program", "مكان الشريط": "Sidebar side", "يمين": "Right", "شمال": "Left", "إغلاق": "Close",\n  "الرئيسية": "Home", "السجلات": "Records", "الأرشيف": "Archive",\n  "إجمالي السيستم": "Total Sum", "عدد العمليات": "Operations",\n  "مطبوع اليوم": "Printed today", "ملغي": "Voided", "مكرر": "Duplicate",\n  "⚡ فحص اليوم": "⚡ Scan Today", "⏳ جاري الفحص...": "⏳ Scanning...",\n  "📄 ملخص الفحص PDF": "📄 PDF Summary", "اختر الوحدة للملخص": "Choose unit for summary",\n  "الماكينة: —": "Terminal: —", "📄 فتح الملخص PDF": "📄 Open Summary PDF",\n  "⏳ جاري الفتح...": "⏳ Opening...",\n  "➕ معاملة يدوية": "➕ Manual", "معاملة يدوية PDF": "Manual Receipt PDF",\n  "المبلغ + Enter *": "Amount + Enter *", "اسم المؤمن له (اختياري)": "Insured Name (Optional)",\n  "رقم اللوحة (اختياري)": "Plate No (Optional)", "وحدة المرور (اختياري)": "Traffic Unit (Optional)",\n  "اختر الوحدة (إجباري)": "Choose unit (required)",\n  "توليد وطباعة (Enter)": "Generate & Print (Enter)", "⏳ جاري التنفيذ...": "⏳ Working...",\n  "🔍 عرض السجل": "🔍 Records Viewer", "🖨️ طباعة الأخير": "🖨️ Reprint Last",\n  "الرجوع التلقائي": "Auto return", "إيقاف": "Off",\n  "الإيصالات المفتوحة": "Open receipts", "إيقاف الإغلاق": "Don\'t close",\n  "بحث اسم، لوحة، شاسيه، مبلغ...": "Search name, plate, chassis, amount...",\n  "كل الحالات": "All statuses", "سليم": "Valid", "يدوي": "Manual",\n  "بحث في الأرشيف...": "Search archive...", "🔎 بحث": "🔎 Search",\n  "كلمة مرور المشرف": "Supervisor password", "دخول المشرف": "Supervisor login",\n  "آخر 7 أيام (للمشرف: الكل)": "Last 7 days (supervisor: all)",\n  "وضع المشرف — كل الأيام متاحة": "Supervisor mode — all days available",\n  "● الأرشفة جاهزة": "● Archive ready",\n  "📄 فتح": "📄 Open", "🖨️ طباعة": "🖨️ Print", "↩️ استرجاع": "↩️ Restore", "❌ إلغاء": "❌ Void",\n  "تأكيد الإلغاء": "Confirm void", "تراجع": "Cancel", "📄 فتح الإيصال": "📄 Open Receipt",\n  "لا توجد نتائج": "No results", "اضغط (⚡ فحص اليوم)": "Press (⚡ Scan Today)",\n  "لا توجد أيام مؤرشفة": "No archived days",\n  "تعذر الفتح": "Could not open", "✓ أُرسل للطابعة": "✓ Sent to printer", "تعذرت الطباعة": "Could not print",\n  "البرنامج مغلق": "Program is closed", "البرنامج مغلق — شغّل A2R Console": "Program is closed — start A2R Console",\n  "✓ تم الاسترجاع": "✓ Restored", "تعذر الاسترجاع": "Could not restore",\n  "✓ تم الإلغاء": "✓ Voided", "تعذر الإلغاء": "Could not void", "تعذر البحث": "Search failed",\n  "✓ تم حفظ إعداد الرجوع التلقائي": "✓ Auto return setting saved",\n  "✓ تم حفظ عدد الإيصالات المفتوحة": "✓ Open receipts limit saved",\n  "لا توجد إيصالات اليوم": "No receipts today", "اختر الوحدة أولاً": "Choose the unit first",\n  "✓ تم فتح ملخص الفحص PDF": "✓ PDF summary opened", "تعذر إنشاء الملخص": "Could not create summary",\n  "أدخل المبلغ أولاً": "Enter the amount first", "مبلغ غير صالح": "Invalid amount",\n  "✓ تمت إعادة طباعة الأخير": "✓ Last receipt reprinted", "لا يوجد إيصال اليوم": "No receipt today",\n  "✓ تم تفعيل المشرف": "✓ Supervisor enabled", "كلمة المرور غير صحيحة": "Incorrect password",\n  // رسايل البرنامج نفسه (بتيجي بالعربي من السيرفر)\n  "مجلد الإيصالات غير موجود": "Receipts directory not found!", "pdftotext.exe غير موجود": "pdftotext.exe not found",\n  "جاري الفحص بالفعل...": "Scan already running...", "لا يوجد إيصال مطبوع اليوم": "No receipt printed today",\n  "الملف غير موجود": "File not found", "المعاملة غير موجودة": "Transaction not found",\n  "ReportLab غير مثبت": "ReportLab is not installed", "الأرشفة تعمل بالفعل": "Archiving already running",\n  "يرجى اختيار الوحدة أولاً": "Please choose the unit first",\n  "لا توجد إيصالات اليوم لعمل الملخص": "No receipts today to build the summary",\n};\nconst EN_RX = [\n  [/^(\\d+) ثانية$/, (m) => `${m[1]} sec`],\n  [/^لا توجد إيصالات بتاريخ (.+)$/, (m) => `No receipts dated ${m[1]}`],\n  [/^مقفول مؤقتًا \\((\\d+)ث\\)$/, (m) => `Locked for now (${m[1]}s)`],\n];\nlet LANG = "ar";\ntry { if (localStorage.getItem("a2r_lang") === "en") LANG = "en"; } catch (_) {}\nfunction T(ar) {\n  if (LANG !== "en" || ar == null) return ar;\n  const k = String(ar);\n  if (Object.prototype.hasOwnProperty.call(EN, k)) return EN[k];\n  for (const [rx, f] of EN_RX) { const m = k.match(rx); if (m) return f(m); }\n  return k;\n}\nconst L = (ar, en) => (LANG === "en" ? en : ar);\nconst _orig = new WeakMap();\nfunction translateStatic() {\n  const html = document.documentElement;\n  html.lang = LANG;\n  html.dir = LANG === "en" ? "ltr" : "rtl";\n  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);\n  const nodes = [];\n  while (walker.nextNode()) nodes.push(walker.currentNode);\n  for (const n of nodes) {\n    const p = n.parentElement;\n    if (!p || p.closest("[data-dyn]") || p.tagName === "SCRIPT" || p.tagName === "STYLE") continue;\n    if (!_orig.has(n)) {\n      const t = n.nodeValue.trim();\n      if (!t || !/[\\u0600-\\u06FF]/.test(t)) continue;\n      _orig.set(n, n.nodeValue);\n    }\n    const o = _orig.get(n);\n    const t = o.trim();\n    n.nodeValue = o.replace(t, T(t));\n  }\n  document.querySelectorAll("[placeholder],[title]").forEach((el) => {\n    for (const a of ["placeholder", "title"]) {\n      if (!el.hasAttribute(a)) continue;\n      const key = "a2rOrig_" + a;\n      if (el.dataset[key] === undefined) {\n        const v = el.getAttribute(a);\n        if (!/[\\u0600-\\u06FF]/.test(v)) continue;\n        el.dataset[key] = v;\n      }\n      el.setAttribute(a, T(el.dataset[key]));\n    }\n  });\n}\nfunction setLang(lang, force = false) {\n  const l = lang === "en" ? "en" : "ar";\n  if (l === LANG && !force) return;\n  LANG = l;\n  try { localStorage.setItem("a2r_lang", l); } catch (_) {}\n  try { chrome.storage.local.set({ a2r_lang: l }); } catch (_) {}\n  translateStatic();\n  // النصوص اللي بتتكتب بالكود بتتحدّث مع أول تحديث بعد كده\n  state.metaLoaded = false;\n  populateSelects();\n  if (typeof renderRecords === "function") { try { renderRecords(); } catch (_) {} }\n}\n\n// v91: تكبير كل المحتوى (الخطوط والأزرار وخانة الإجمالي) مع عرض الشريط\nconst BASE_W = 132;\nfunction fitScale() {\n  const b = document.body;\n  if (!b) return;\n  if (!IS_SLIM) { b.classList.add("sp"); return; }\n  const z = Math.max(1, Math.min(3.6, window.innerWidth / BASE_W));\n  b.style.zoom = String(z);\n  b.style.height = (window.innerHeight / z) + "px";\n}\nwindow.addEventListener("resize", fitScale);\n\n\nfunction showToast(msg, ms = 2400) {\n  const el = $("toast");\n  el.textContent = T(msg);\n  el.classList.remove("hidden");\n  clearTimeout(el._t);\n  el._t = setTimeout(() => el.classList.add("hidden"), ms);\n}\n\nfunction fmtMoney(n) {\n  return Number(n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });\n}\n\nfunction todayISO() {\n  const d = new Date();\n  const y = d.getFullYear();\n  const m = String(d.getMonth() + 1).padStart(2, "0");\n  const day = String(d.getDate()).padStart(2, "0");\n  return `${y}-${m}-${day}`;\n}\n\nfunction tokenProblem(r) {\n  if (r.status === 401 || r.status === 403) {\n    const extPage = /\\bEdg\\//.test(navigator.userAgent || "") ? "edge://extensions" : "chrome://extensions";\n    showToast(L(`الإضافة محتاجة تتحدّث: افتح البرنامج مرة وبعدين Reload للإضافة من ${extPage}`,\n      `The extension needs updating: open the program once, then Reload the extension in ${extPage}`), 6000);\n    return true;\n  }\n  return false;\n}\n\nasync function apiGet(path) {\n  const r = await fetch(API + path, { cache: "no-store", headers: bridgeHeaders() });\n  if (!r.ok) { tokenProblem(r); throw new Error("HTTP " + r.status); }\n  return await r.json();\n}\n\nasync function apiPost(path, body = {}) {\n  const r = await fetch(API + path, {\n    method: "POST",\n    headers: bridgeHeaders({ "Content-Type": "application/json" }),\n    body: JSON.stringify(body),\n  });\n  if (!r.ok) { tokenProblem(r); throw new Error("HTTP " + r.status); }\n  return await r.json();\n}\n\nfunction setConnected(ok, version = "") {\n  state.connected = ok;\n  const b = $("connBadge");\n  if (ok) {\n    b.textContent = T("● متصل");\n    b.className = "badge online";\n    if (version) $("footVer").textContent = `A2R ${version} • Ahmed Ramadan`;\n  } else {\n    b.textContent = T("● مغلق");\n    b.className = "badge offline";\n  }\n}\n\nfunction populateSelects() {\n  if (state.metaLoaded) return;\n  const keepM = $("mUnit") ? $("mUnit").value : "", keepS = $("sumUnit") ? $("sumUnit").value : "";\n  const fill = (sel, items, placeholder) => {\n    if (!sel) return;\n    sel.innerHTML = "";\n    const opt0 = document.createElement("option");\n    opt0.value = "";\n    opt0.textContent = placeholder;\n    sel.appendChild(opt0);\n    items.forEach((v) => {\n      const o = document.createElement("option");\n      o.value = v;\n      o.textContent = v;\n      sel.appendChild(o);\n    });\n  };\n  fill($("mUnit"), state.units, T("وحدة المرور (اختياري)"));\n  fill($("sumUnit"), state.units, T("اختر الوحدة (إجباري)"));\n  if (keepM && $("mUnit")) $("mUnit").value = keepM;\n  if (keepS && $("sumUnit")) $("sumUnit").value = keepS;\n  state.metaLoaded = true;\n}\n\nfunction applyStatus(d) {\n  if (d && (d.lang === "en" || d.lang === "ar")) setLang(d.lang);\n  setConnected(true, d.version || "");\n  if (d.units && d.units.length) {\n    state.units = d.units;\n    state.terminals = d.terminals || {};\n    populateSelects();\n  }\n  const wasSup = state.isSupervisor;\n  state.isSupervisor = !!d.is_supervisor;\n  if (wasSup && !state.isSupervisor) {\n    // v2.9.5: صلاحية المشرف خلصت (بتقفل لوحدها بعد مدة) — نرجّع خانة الباسورد\n    SUP_KEY = "";\n    $("archAuthRow").style.display = "";\n    $("archRoleHint").textContent = T("آخر 7 أيام (للمشرف: الكل)");\n  }\n  $("kpiPrinted").textContent = String(d.printed_today || 0);\n\n  const s = d.summary || {};\n  state.systemSum = Number(s.total_sum || 0);\n  $("kpiCount").textContent = String(s.total_count || 0);\n  $("kpiSum").textContent = fmtMoney(state.systemSum);\n  $("kpiVoid").textContent = String(s.void_count || 0);\n  $("kpiDup").textContent = String(s.duplicates || 0);\n\n  const archEl = $("archStatus");\n  if (d.archive_done_today) {\n    archEl.textContent = L("✓ الأرشفة مكتملة", "✓ Archive done") + (d.archive_time ? " (" + d.archive_time + ")" : "");\n    archEl.style.color = "#81C995";\n  } else {\n    archEl.textContent = T("● الأرشفة جاهزة");\n    archEl.style.color = "#9AA0A6";\n  }\n\n  if (state.isSupervisor) {\n    $("archAuthRow").style.display = "none";\n    $("archRoleHint").textContent = T("وضع المشرف — كل الأيام متاحة");\n  }\n\n  // شريط تقدم الفحص (v2.8)\n  state.isProcessing = !!d.is_processing;\n  const progEl = $("scanProg");\n  if (progEl) {\n    if (state.isProcessing) {\n      const pct = Math.max(0, Math.min(100, Math.round(Number(d.progress || 0) * 100)));\n      progEl.classList.remove("hidden");\n      $("scanProgFill").style.width = pct + "%";\n      $("scanProgPct").textContent = pct + "%";\n    } else {\n      progEl.classList.add("hidden");\n    }\n  }\n}\n\nasync function refreshStatus() {\n  try {\n    const d = await apiGet("/api/status");\n    applyStatus(d);\n    if (!state.initialSynced) {\n      state.initialSynced = true;\n      const cnt = Number((d.summary || {}).total_count || 0);\n      if (cnt === 0 && !d.is_processing) {\n        apiPost("/api/scan", { date: todayISO() })\n          .then(async (res) => {\n            if (res && res.ok) {\n              const d2 = await apiGet("/api/status");\n              applyStatus(d2);\n              await refreshRecords();\n            }\n          })\n          .catch(() => {});\n      }\n    }\n    return true;\n  } catch (_) {\n    setConnected(false);\n    return false;\n  }\n}\n\nasync function refreshRecords() {\n  try {\n    const d = await apiGet("/api/records");\n    state.records = d.records || [];\n    renderRecords();\n  } catch (_) {}\n}\n\nfunction renderRecords() {\n  const q = ($("recSearch").value || "").trim().toLowerCase();\n  const filt = $("recFilter").value;\n  const list = $("recList");\n  list.innerHTML = "";\n\n  let shown = 0;\n  let shownSum = 0;\n  state.records.forEach((r) => {\n    if (filt !== "all" && r.kind !== filt) return;\n    if (q) {\n      const hay = `${r.unit} ${r.plate} ${r.insured} ${r.amount} ${r.chassis} ${r.motor} ${r.file} ${r.status_text}`.toLowerCase();\n      if (!hay.includes(q)) return;\n    }\n    shown++;\n    if (!r.is_void) shownSum += Number(r.amount || 0);\n\n    const card = document.createElement("div");\n    card.className = `rec-item kind-${r.kind || "ok"}`;\n\n    const top = document.createElement("div");\n    top.className = "rec-top";\n    const title = document.createElement("span");\n    title.textContent = `#${r.idx} ${r.plate !== "-" ? r.plate : r.insured}`;\n    const amt = document.createElement("span");\n    amt.className = "rec-amt";\n    amt.textContent = fmtMoney(r.amount);\n    top.append(title, amt);\n\n    const meta = document.createElement("div");\n    meta.className = "rec-meta";\n    meta.textContent = `${r.insured} | ${r.time} · ${r.status_text}`;\n\n    const acts = document.createElement("div");\n    acts.className = "rec-actions";\n\n    const bOpen = document.createElement("button");\n    bOpen.textContent = T("📄 فتح");\n    bOpen.addEventListener("click", () => apiPost("/api/open_file", { file: r.file }).catch(() => showToast("تعذر الفتح")));\n\n    const bPrint = document.createElement("button");\n    bPrint.textContent = T("🖨️ طباعة");\n    bPrint.addEventListener("click", async () => {\n      try {\n        const res = await apiPost("/api/reprint", { file: r.file });\n        showToast(res.ok ? "✓ أُرسل للطابعة" : "تعذرت الطباعة");\n      } catch (_) { showToast("البرنامج مغلق"); }\n    });\n\n    const bVoid = document.createElement("button");\n    if (r.is_void) {\n      bVoid.className = "btn-r";\n      bVoid.textContent = T("↩️ استرجاع");\n      bVoid.addEventListener("click", async () => {\n        try {\n          await apiPost("/api/unvoid", { file: r.file });\n          showToast("✓ تم الاسترجاع");\n          await refreshStatus();\n          await refreshRecords();\n        } catch (_) { showToast("تعذر الاسترجاع"); }\n      });\n    } else {\n      bVoid.className = "btn-v";\n      bVoid.textContent = T("❌ إلغاء");\n      bVoid.addEventListener("click", () => {\n        const old = card.querySelector(".void-row");\n        if (old) { old.remove(); return; }\n        const row = document.createElement("div");\n        row.className = "void-row";\n        const inp = document.createElement("input");\n        inp.className = "input";\n        inp.placeholder = L(`سبب إلغاء #${r.idx} (${fmtMoney(r.amount)} ج.م)`, `Void reason #${r.idx} (${fmtMoney(r.amount)} EGP)`);\n        const btns = document.createElement("div");\n        btns.className = "void-btns";\n        const bOk = document.createElement("button");\n        bOk.className = "btn-confirm";\n        bOk.textContent = T("تأكيد الإلغاء");\n        const bNo = document.createElement("button");\n        bNo.textContent = T("تراجع");\n        bNo.addEventListener("click", () => row.remove());\n        bOk.addEventListener("click", async () => {\n          bOk.disabled = true;\n          try {\n            await apiPost("/api/void", { file: r.file, reason: inp.value.trim() });\n            showToast("✓ تم الإلغاء");\n            await refreshStatus();\n            await refreshRecords();\n          } catch (_) {\n            showToast("تعذر الإلغاء");\n            bOk.disabled = false;\n          }\n        });\n        btns.append(bOk, bNo);\n        row.append(inp, btns);\n        card.appendChild(row);\n        inp.focus();\n      });\n    }\n\n    acts.append(bOpen, bPrint, bVoid);\n    card.append(top, meta, acts);\n    list.appendChild(card);\n  });\n\n  $("recStats").textContent = L(`${shown} سجل | ${fmtMoney(shownSum)} ج.م`, `${shown} records | ${fmtMoney(shownSum)} EGP`);\n  if (!shown) {\n    const empty = document.createElement("div");\n    empty.className = "hint center mt-4";\n    empty.textContent = T(state.records.length ? "لا توجد نتائج" : "اضغط (⚡ فحص اليوم)");\n    list.appendChild(empty);\n  }\n}\n\nasync function loadArchiveDays() {\n  try {\n    const d = await apiGet("/api/archive/days");\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.days || []).forEach((item) => {\n      const card = document.createElement("div");\n      card.className = "rec-item" + (item.dup ? " kind-dup" : item.missing ? " kind-missing" : "");\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      top.innerHTML = `<span>📅 ${item.day}</span><span class="rec-amt">${fmtMoney(item.total)}</span>`;\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = L(`العدد: ${item.ops} | ملغي: ${item.void} | يدوي: ${item.manual}`, `Ops: ${item.ops} | Voided: ${item.void} | Manual: ${item.manual}`);\n      card.append(top, meta);\n      box.appendChild(card);\n    });\n    if (!(d.days || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">\' + T("لا توجد أيام مؤرشفة") + \'</div>\';\n    }\n  } catch (_) {}\n}\n\nasync function doArchiveSearch() {\n  const q = ($("archQuery").value || "").trim();\n  if (!q) return loadArchiveDays();\n  try {\n    const d = await apiGet(`/api/archive/search?q=${encodeURIComponent(q)}`);\n    const box = $("archResults");\n    box.innerHTML = "";\n    (d.results || []).forEach((r) => {\n      const card = document.createElement("div");\n      card.className = `rec-item ${r.is_void ? "kind-void" : r.is_manual ? "kind-manual" : ""}`;\n      const top = document.createElement("div");\n      top.className = "rec-top";\n      const t1 = document.createElement("span");\n      t1.textContent = `${r.day} ${r.plate !== "-" ? r.plate : ""}`;\n      const t2 = document.createElement("span");\n      t2.className = "rec-amt";\n      t2.textContent = fmtMoney(r.amount);\n      top.append(t1, t2);\n      const meta = document.createElement("div");\n      meta.className = "rec-meta";\n      meta.textContent = `${r.insured} | ${r.time}`;\n      const acts = document.createElement("div");\n      acts.className = "rec-actions";\n      const bOpen = document.createElement("button");\n      bOpen.textContent = T("📄 فتح الإيصال");\n      bOpen.addEventListener("click", () => apiPost("/api/open_file", { path: r.path }).catch(() => showToast("تعذر الفتح")));\n      acts.appendChild(bOpen);\n      card.append(top, meta, acts);\n      box.appendChild(card);\n    });\n    if (!(d.results || []).length) {\n      box.innerHTML = \'<div class="hint center mt-4">\' + T("لا توجد نتائج") + \'</div>\';\n    }\n  } catch (_) {\n    showToast("تعذر البحث");\n  }\n}\n\ndocument.addEventListener("DOMContentLoaded", () => {\n  fitScale();\n  translateStatic();\n  const bp = $("btnPortal");\n  if (bp) bp.addEventListener("click", () => {\n    try { chrome.runtime.sendMessage({ type: "A2R_GOTO_PORTAL" }).catch(() => {}); } catch (_) {}\n  });\n  if (IS_SLIM) {\n    $("btnCloseSlim").classList.remove("hidden");\n    $("btnCloseSlim").addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_CLOSE_SIDEBAR" }, "*");\n    });\n    // v2.9.6: مكان الشريط يمين / شمال (الصفحة بتتزق للناحية التانية فمفيش بيانات تستخبى)\n    const selSide = $("selSide");\n    $("rowSide").classList.remove("hidden");\n    try {\n      chrome.storage.local.get({ a2r_sidebar_side: "right" }, (r) => { selSide.value = r && r.a2r_sidebar_side === "left" ? "left" : "right"; });\n      chrome.storage.onChanged.addListener((ch, area) => {\n        if (area === "local" && ch.a2r_sidebar_side) selSide.value = ch.a2r_sidebar_side.newValue === "left" ? "left" : "right";\n      });\n    } catch (_) {}\n    selSide.addEventListener("change", () => {\n      try { chrome.storage.local.set({ a2r_sidebar_side: selSide.value === "left" ? "left" : "right" }); } catch (_) {}\n    });\n    const pinBtn = $("btnPinSite");\n    pinBtn.classList.remove("hidden");\n    pinBtn.addEventListener("click", () => {\n      window.parent.postMessage({ type: "A2R_TOGGLE_SITE" }, "*");\n    });\n    window.parent.postMessage({ type: "A2R_QUERY_SITE" }, "*");\n    window.addEventListener("message", (ev) => {\n      if (!ev || ev.source !== window.parent || !ev.data || ev.data.type !== "A2R_SITE_STATE") return;\n      pinBtn.classList.toggle("pinned", !!ev.data.pinned);\n      const _pt = ev.data.fixed\n        ? "الإضافة تعمل دائمًا على بوابة المرور"\n        : (ev.data.pinned ? "الإضافة مثبتة على هذا الموقع — اضغط للإيقاف" : "تشغيل الإضافة تلقائيًا على هذا الموقع");\n      pinBtn.dataset.a2rOrig_title = _pt;\n      pinBtn.title = T(_pt);\n    });\n  }\n\n  // إعداد الرجوع التلقائي للبوابة (v2.8)\n  const selIdle = $("selIdle");\n  if (selIdle) {\n    try {\n      chrome.storage.local.get({ a2r_idle_sec: 40 }, (res) => {\n        if (chrome.runtime.lastError) return;\n        const v = Number(res.a2r_idle_sec);\n        let vv = isNaN(v) ? 40 : v;\n        if (vv > 60) vv = 60;\n        if (vv > 0 && vv < 5) vv = 5;\n        vv = vv > 0 ? Math.round(vv / 5) * 5 : 0;\n        selIdle.value = String(vv);\n      });\n    } catch (_) {}\n    selIdle.addEventListener("change", () => {\n      try {\n        chrome.storage.local.set({ a2r_idle_sec: Number(selIdle.value) });\n        showToast("✓ تم حفظ إعداد الرجوع التلقائي");\n      } catch (_) {}\n    });\n  }\n  const selReceiptLimit = $("selReceiptLimit");\n  if (selReceiptLimit) {\n    const normalizeLimit = value => {\n      const n = Number(value);\n      return Number.isInteger(n) && [0,1,2,3,4,5,6,8,10].includes(n) ? n : 4;\n    };\n    selReceiptLimit.value = "4";\n    try {\n      chrome.storage.local.get({ a2r_receipt_limit: 4 }, res => {\n        if (!chrome.runtime.lastError) selReceiptLimit.value = String(normalizeLimit(res.a2r_receipt_limit));\n      });\n      chrome.storage.onChanged.addListener((changes, area) => {\n        if (area === "local" && changes.a2r_receipt_limit)\n          selReceiptLimit.value = String(normalizeLimit(changes.a2r_receipt_limit.newValue));\n      });\n    } catch (_) {}\n    selReceiptLimit.addEventListener("change", () => {\n      try {\n        chrome.storage.local.set({ a2r_receipt_limit: normalizeLimit(selReceiptLimit.value) });\n        showToast("✓ تم حفظ عدد الإيصالات المفتوحة");\n      } catch (_) {}\n    });\n  }\n  let _lastAct = 0;\n  const _pingAct = () => {\n    const now = Date.now();\n    if (now - _lastAct < 2000) return;\n    _lastAct = now;\n    try { chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {}); } catch (_) {}\n    if (IS_SLIM) window.parent.postMessage({ type: "A2R_USER_ACTIVITY" }, "*");\n  };\n  ["mousedown", "keydown", "input", "wheel", "mousemove"].forEach((ev) => {\n    window.addEventListener(ev, _pingAct, { passive: true, capture: true });\n  });\n\n  document.querySelectorAll(".tab-btn").forEach((btn) => {\n    btn.addEventListener("click", () => {\n      document.querySelectorAll(".tab-btn").forEach((b) => b.classList.remove("active"));\n      document.querySelectorAll(".tab-pane").forEach((p) => p.classList.remove("active"));\n      btn.classList.add("active");\n      $("tab-" + btn.dataset.tab).classList.add("active");\n      if (btn.dataset.tab === "records") refreshRecords();\n      if (btn.dataset.tab === "archive") loadArchiveDays();\n    });\n  });\n\n  // 1. فحص اليوم\n  $("btnScan").addEventListener("click", async () => {\n    const b = $("btnScan");\n    b.disabled = true;\n    b.textContent = T("⏳ جاري الفحص...");\n    try {\n      const res = await apiPost("/api/scan", { date: todayISO() });\n      if (res.ok) {\n        await refreshStatus();\n        await refreshRecords();\n        showToast(L(`✓ ${res.total_count} عملية (${fmtMoney(res.total_sum)})`, `✓ ${res.total_count} operations (${fmtMoney(res.total_sum)})`));\n      } else {\n        showToast(res.error || "لا توجد إيصالات اليوم");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق — شغّل A2R Console");\n    } finally {\n      b.disabled = false;\n      b.textContent = T("⚡ فحص اليوم");\n    }\n  });\n\n  // 2. ملخص الفحص PDF\n  $("btnSummaryPdf").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n    $("summaryBox").classList.toggle("hidden");\n  });\n  $("btnSumCancel").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n  });\n  $("sumUnit").addEventListener("change", () => {\n    const tid = state.terminals[$("sumUnit").value] || "";\n    $("sumTid").textContent = tid ? L(`الماكينة: ${tid}`, `Terminal: ${tid}`) : T("الماكينة: —");\n  });\n  $("btnSumPrint").addEventListener("click", async () => {\n    const unit = ($("sumUnit").value || "").trim();\n    if (!unit) return showToast("اختر الوحدة أولاً");\n    const b = $("btnSumPrint");\n    b.disabled = true;\n    b.textContent = T("⏳ جاري الفتح...");\n    try {\n      const res = await apiPost("/api/summary_pdf", { unit, print: false });\n      if (res.ok) {\n        $("summaryBox").classList.add("hidden");\n        showToast("✓ تم فتح ملخص الفحص PDF");\n      } else {\n        showToast(res.error || "تعذر إنشاء الملخص");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = T("📄 فتح الملخص PDF");\n    }\n  });\n\n  // 3. معاملة يدوية (فتح فوري + تنفيذ بـ Enter)\n  $("btnQuickManual").addEventListener("click", () => {\n    $("summaryBox").classList.add("hidden");\n    const box = $("manualBox");\n    box.classList.toggle("hidden");\n    if (!box.classList.contains("hidden")) {\n      setTimeout(() => { if ($("mAmount")) $("mAmount").focus(); }, 40);\n    }\n  });\n  $("btnManualCancel").addEventListener("click", () => {\n    $("manualBox").classList.add("hidden");\n  });\n\n  async function submitManualReceipt() {\n    const b = $("btnAddManual");\n    if (b.disabled) return;\n    const amount = ($("mAmount").value || "").trim();\n    if (!amount) return showToast("أدخل المبلغ أولاً");\n    b.disabled = true;\n    b.textContent = T("⏳ جاري التنفيذ...");\n    try {\n      const res = await apiPost("/api/manual", {\n        amount,\n        insured: $("mName").value.trim(),\n        plate: $("mPlate").value.trim(),\n        unit: $("mUnit").value.trim(),\n      });\n      if (res.ok) {\n        $("mAmount").value = "";\n        $("mName").value = "";\n        $("mPlate").value = "";\n        showToast(L(`✓ إيصال يدوي (${fmtMoney(res.amount)})`, `✓ Manual receipt (${fmtMoney(res.amount)})`));\n        if (res.pdf_url) {\n          try {\n            chrome.runtime.sendMessage({ type: "A2R_OPEN_TAB", url: res.pdf_url }).catch(() => {\n              window.open(res.pdf_url, "_blank");\n            });\n          } catch (_) {\n            window.open(res.pdf_url, "_blank");\n          }\n        }\n        await refreshStatus();\n        await refreshRecords();\n        $("mAmount").focus();\n      } else {\n        showToast(res.error || "مبلغ غير صالح");\n      }\n    } catch (_) {\n      showToast("البرنامج مغلق");\n    } finally {\n      b.disabled = false;\n      b.textContent = T("توليد وطباعة (Enter)");\n    }\n  }\n  $("btnAddManual").addEventListener("click", submitManualReceipt);\n  ["mAmount", "mName", "mPlate", "mUnit"].forEach((id) => {\n    $(id).addEventListener("keydown", (e) => {\n      if (e.key === "Enter") {\n        e.preventDefault();\n        submitManualReceipt();\n      }\n    });\n  });\n\n  // 4. عرض السجل\n  $("btnViewRecords").addEventListener("click", () => {\n    const tabBtn = document.querySelector(\'.tab-btn[data-tab="records"]\');\n    if (tabBtn) tabBtn.click();\n  });\n\n  // 5. طباعة الأخير\n  $("btnReprintLast").addEventListener("click", async () => {\n    try {\n      const res = await apiPost("/api/reprint_last");\n      showToast(res.ok ? "✓ تمت إعادة طباعة الأخير" : (res.error || "لا يوجد إيصال اليوم"));\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  $("btnTopOpenApp").addEventListener("click", () => {\n    apiPost("/api/open_app", { mode: "show" }).catch(() => showToast("البرنامج مغلق"));\n  });\n\n  $("recSearch").addEventListener("input", renderRecords);\n  $("recFilter").addEventListener("change", renderRecords);\n\n  $("btnArchSearch").addEventListener("click", doArchiveSearch);\n  $("archQuery").addEventListener("keydown", (e) => { if (e.key === "Enter") doArchiveSearch(); });\n  $("btnArchUnlock").addEventListener("click", async () => {\n    const pwd = ($("archPwd").value || "").trim();\n    if (!pwd) return;\n    try {\n      const res = await apiPost("/api/auth", { password: pwd });\n      if (res.ok && res.is_supervisor) {\n        SUP_KEY = String(res.sup_key || "");\n        state.isSupervisor = true;\n        $("archPwd").value = "";\n        $("archAuthRow").style.display = "none";\n        $("archRoleHint").textContent = T("وضع المشرف — كل الأيام متاحة");\n        showToast("✓ تم تفعيل المشرف");\n        loadArchiveDays();\n      } else {\n        showToast(res.error || "كلمة المرور غير صحيحة");\n      }\n    } catch (_) { showToast("البرنامج مغلق"); }\n  });\n\n  // تحديث الحالة: يتوقف وهي مخفية، ويتسارع أثناء الفحص (v2.8)\n  let pollTimer = null;\n  function schedulePoll() {\n    clearTimeout(pollTimer);\n    if (document.hidden) return;\n    pollTimer = setTimeout(pollTick, state.isProcessing ? 1000 : 4000);\n  }\n  async function pollTick() {\n    await refreshStatus();\n    schedulePoll();\n  }\n  document.addEventListener("visibilitychange", () => {\n    if (document.hidden) {\n      clearTimeout(pollTimer);\n    } else {\n      refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n    }\n  });\n  refreshStatus().then((ok) => { if (ok) refreshRecords(); }).finally(schedulePoll);\n});\n', 'content_sidebar.js': '// A2R Operations Console - Persistent Resizable Slim Sidebar (170px, Push-Layout, Chrome Dark) + Idle Detector\n(() => {\n  const HOST_ID = "a2r-slim-sidebar-host";\n  const PUSH_STYLE_ID = "a2r-slim-sidebar-push-style";\n  const KEY_OPEN = "a2r_sidebar_open";\n  const KEY_WIDTH = "a2r_sidebar_width_v3";\n  const KEY_SITES = "a2r_sidebar_sites";\n  // v2.9.6: مكان الشريط يمين أو شمال (بيتغيّر من زر ⇄ في الشريط) — والصفحة بتتزق للناحية التانية فمفيش حاجة تستخبى\n  const KEY_SIDE = "a2r_sidebar_side";\n  let side = "right";\n  const HANDLE_AR = "اسحب لتكبير أو تصغير العرض (دبل كليك للحجم التلقائي حسب المتصفح)";\n  const HANDLE_EN = "Drag to resize (double-click for automatic width)";\n  let handleLang = "ar", currentHandle = null;\n  const PORTAL_HOST = "192.168.235.50";\n  const DEFAULT_WIDTH = 170;\n  const MIN_WIDTH = 145;\n  const MAX_WIDTH = 480;\n  // v2.9.5: رسايل الشريط بنقبلها من إطار الإضافة نفسه بس (مش من أي صفحة)\n  let EXT_ORIGIN = "";\n  try { EXT_ORIGIN = new URL(chrome.runtime.getURL("/")).origin; } catch (_) {}\n  let sidebarFrame = null;\n\n  // v91: العرض الافتراضي نسبة من عرض نافذة المتصفح (12%) بحد أدنى 150 وأقصى 300\n  function autoWidth() {\n    return Math.max(150, Math.min(300, Math.round(window.innerWidth * 0.12)));\n  }\n  let currentWidth = autoWidth();\n\n  function clampWidth(w) {\n    const n = Math.round(Number(w) || DEFAULT_WIDTH);\n    return Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, n));\n  }\n\n  function applyPagePush(w) {\n    let st = document.getElementById(PUSH_STYLE_ID);\n    if (!st) {\n      st = document.createElement("style");\n      st.id = PUSH_STYLE_ID;\n      (document.head || document.documentElement).appendChild(st);\n    }\n    st.textContent = `\n      html {\n        width: calc(100% - ${w}px) !important;\n        max-width: calc(100% - ${w}px) !important;\n        margin-${side}: ${w}px !important;\n        box-sizing: border-box !important;\n      }\n      body {\n        max-width: 100% !important;\n        box-sizing: border-box !important;\n      }\n    `;\n  }\n\n\n  // v94: إصلاح العناصر التي تتجاهل تصغير الصفحة (fixed / absolute / عرض بوحدات vw) حتى لا تختفي تحت الشريط.\n  // يعمل مرة عند الفتح ومرة بعد ثانية وعند تغيير الحجم فقط، بدون مراقبين مستمرين.\n  const FIX_PROPS = ["right", "left", "max-width", "box-sizing"];\n  const fixedOrig = new Map();\n  let fixTimer = 0;\n\n  function restoreFixups() {\n    fixedOrig.forEach((orig, el) => {\n      try {\n        FIX_PROPS.forEach((pr) => {\n          if (orig[pr] && orig[pr][0]) el.style.setProperty(pr, orig[pr][0], orig[pr][1]);\n          else el.style.removeProperty(pr);\n        });\n      } catch (_) {}\n    });\n    fixedOrig.clear();\n  }\n\n  function remember(el) {\n    if (fixedOrig.has(el)) return;\n    const o = {};\n    FIX_PROPS.forEach((pr) => { o[pr] = [el.style.getPropertyValue(pr), el.style.getPropertyPriority(pr)]; });\n    fixedOrig.set(el, o);\n  }\n\n  function runFixups() {\n    try {\n      const host = document.getElementById(HOST_ID);\n      const body = document.body;\n      if (!host || !body) return;\n      restoreFixups();\n      const vw = window.innerWidth;\n      const limit = vw - currentWidth;\n      const list = [];\n      const add = (el) => { if (el && el !== host && el.nodeType === 1 && list.length < 160) list.push(el); };\n      Array.from(body.children).forEach((el) => {\n        add(el);\n        Array.from(el.children).forEach(add);\n      });\n      const reads = [];\n      for (const el of list) {\n        if (el.id === PUSH_STYLE_ID || /^(SCRIPT|STYLE|LINK|META|NOSCRIPT)$/.test(el.tagName)) continue;\n        const cs = getComputedStyle(el);\n        if (cs.display === "none" || cs.visibility === "hidden") continue;\n        const r = el.getBoundingClientRect();\n        if (r.width < 40 || r.height < 4) continue;\n        if (side === "left") {\n          if (r.left >= currentWidth - 2 || r.right <= currentWidth) continue;\n          reads.push([el, cs.position, r, Math.abs(r.left) <= 3]);\n          continue;\n        }\n        if (r.right <= limit + 2 || r.left >= limit) continue;\n        reads.push([el, cs.position, r, Math.abs(vw - r.right) <= 3]);\n      }\n      for (const [el, pos, r, edgeAnchored] of reads) {\n        remember(el);\n        if (side === "left") {\n          // الشريط على الشمال: العناصر الثابتة اللي لازقة في الشمال تتزق جنبه\n          if (pos === "fixed" || pos === "absolute") {\n            if (edgeAnchored) el.style.setProperty("left", currentWidth + "px", "important");\n            el.style.setProperty("box-sizing", "border-box", "important");\n            el.style.setProperty("max-width", Math.max(60, Math.floor(vw - currentWidth)) + "px", "important");\n          }\n          continue;\n        }\n        if ((pos === "fixed" || pos === "absolute") && edgeAnchored) {\n          el.style.setProperty("right", currentWidth + "px", "important");\n        } else if (r.width >= limit * 0.85 || pos === "fixed" || pos === "absolute") {\n          el.style.setProperty("box-sizing", "border-box", "important");\n          el.style.setProperty("max-width", Math.max(60, Math.floor(limit - r.left)) + "px", "important");\n        }\n      }\n    } catch (_) {}\n  }\n\n  function scheduleFixups(delay) {\n    clearTimeout(fixTimer);\n    fixTimer = setTimeout(runFixups, delay);\n  }\n\n  window.addEventListener("resize", () => { if (document.getElementById(HOST_ID)) scheduleFixups(200); });\n  window.addEventListener("load", () => { if (document.getElementById(HOST_ID)) scheduleFixups(50); });\n\n  function removePagePush() {\n    const st = document.getElementById(PUSH_STYLE_ID);\n    if (st) st.remove();\n  }\n\n  function applyWidth(w) {\n    currentWidth = clampWidth(w);\n    const host = document.getElementById(HOST_ID);\n    if (host) {\n      host.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      scheduleFixups(250);\n    }\n  }\n\n  function closeSidebar() {\n    const el = document.getElementById(HOST_ID);\n    if (el) el.remove();\n    sidebarFrame = null;\n    removePagePush();\n    restoreFixups();\n  }\n\n  function setSide(next) {\n    const n = next === "left" ? "left" : "right";\n    if (n === side) return;\n    side = n;\n    const host = document.getElementById(HOST_ID);\n    if (!host) return;\n    // نفس الإطار بيتنقل من غير ما يتعمل له إعادة تحميل\n    const L = n === "left";\n    host.style.setProperty(L ? "left" : "right", "0", "important");\n    host.style.removeProperty(L ? "right" : "left");\n    host.style.setProperty("box-shadow", L ? "1px 0 8px rgba(0,0,0,0.35)" : "-1px 0 8px rgba(0,0,0,0.35)", "important");\n    host.style.setProperty(L ? "border-right" : "border-left", "1px solid #3C4043", "important");\n    host.style.removeProperty(L ? "border-left" : "border-right");\n    if (currentHandle) {\n      currentHandle.style.setProperty(L ? "right" : "left", "0", "important");\n      currentHandle.style.removeProperty(L ? "left" : "right");\n    }\n    restoreFixups();\n    applyPagePush(currentWidth);\n    scheduleFixups(60);\n  }\n\n  function openSidebar(widthPx = currentWidth) {\n    currentWidth = clampWidth(widthPx);\n    const existing = document.getElementById(HOST_ID);\n    if (existing) {\n      existing.style.setProperty("width", `${currentWidth}px`, "important");\n      applyPagePush(currentWidth);\n      return;\n    }\n\n    applyPagePush(currentWidth);\n\n    const host = document.createElement("div");\n    host.id = HOST_ID;\n    host.style.cssText = [\n      "position:fixed",\n      "top:0",\n      `${side}:0`,\n      `width:${currentWidth}px`,\n      "height:100vh",\n      "z-index:2147483647",\n      side === "left" ? "box-shadow:1px 0 8px rgba(0,0,0,0.35)" : "box-shadow:-1px 0 8px rgba(0,0,0,0.35)",\n      side === "left" ? "border-right:1px solid #3C4043" : "border-left:1px solid #3C4043",\n      "background:#202124",\n      "margin:0",\n      "padding:0",\n      "overflow:hidden",\n      "box-sizing:border-box"\n    ].join(" !important;") + " !important;";\n\n    // Easy-to-grab 8px left-edge drag handle with subtle center grip pill\n    const handle = document.createElement("div");\n    handle.title = "اسحب لتكبير أو تصغير العرض (دبل كليك للحجم التلقائي حسب المتصفح)";\n    // v2.9.6: نفس لغة البرنامج\n    if (handleLang === "en") handle.title = HANDLE_EN;\n    currentHandle = handle;\n    handle.style.cssText = [\n      "position:absolute",\n      "top:0",\n      side === "left" ? "right:0" : "left:0",\n      "width:8px",\n      "height:100%",\n      "cursor:ew-resize",\n      "z-index:10",\n      "background:transparent",\n      "display:flex",\n      "align-items:center",\n      "justify-content:center",\n      "transition:background 0.15s ease"\n    ].join(" !important;") + " !important;";\n\n    const grip = document.createElement("div");\n    grip.style.cssText = [\n      "width:3px",\n      "height:38px",\n      "border-radius:3px",\n      "background:rgba(154,160,166,0.45)",\n      "pointer-events:none"\n    ].join(" !important;") + " !important;";\n    handle.appendChild(grip);\n\n    handle.addEventListener("mouseenter", () => {\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.25)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n    });\n    handle.addEventListener("mouseleave", () => {\n      if (!handle.dataset.dragging) {\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n      }\n    });\n\n    handle.addEventListener("dblclick", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      applyWidth(autoWidth());\n      try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n    });\n\n    handle.addEventListener("mousedown", (ev) => {\n      ev.preventDefault();\n      ev.stopPropagation();\n      handle.dataset.dragging = "1";\n      handle.style.setProperty("background", "rgba(138, 180, 248, 0.45)", "important");\n      grip.style.setProperty("background", "#8AB4F8", "important");\n\n      const shield = document.createElement("div");\n      shield.style.cssText = "position:fixed !important;inset:0 !important;z-index:2147483647 !important;cursor:ew-resize !important;background:transparent !important;";\n      (document.documentElement || document.body).appendChild(shield);\n\n      const onMove = (mEv) => {\n        const w = clampWidth(side === "left" ? mEv.clientX : window.innerWidth - mEv.clientX);\n        applyWidth(w);\n        notifyActivity();\n      };\n\n      const onUp = () => {\n        delete handle.dataset.dragging;\n        handle.style.setProperty("background", "transparent", "important");\n        grip.style.setProperty("background", "rgba(154,160,166,0.45)", "important");\n        window.removeEventListener("mousemove", onMove, true);\n        window.removeEventListener("mouseup", onUp, true);\n        shield.remove();\n        try { chrome.storage.local.set({ [KEY_WIDTH]: currentWidth }); } catch (_) {}\n      };\n\n      window.addEventListener("mousemove", onMove, true);\n      window.addEventListener("mouseup", onUp, true);\n    });\n\n    const iframe = document.createElement("iframe");\n    iframe.src = chrome.runtime.getURL("sidepanel.html?mode=slim");\n    iframe.style.cssText = "width:100% !important;height:100% !important;border:0 !important;display:block !important;background:#202124 !important;";\n    iframe.allow = "clipboard-write";\n    sidebarFrame = iframe;\n\n    host.appendChild(handle);\n    host.appendChild(iframe);\n    (document.documentElement || document.body).appendChild(host);\n    scheduleFixups(60);\n    setTimeout(() => { if (document.getElementById(HOST_ID)) runFixups(); }, 1000);\n  }\n\n  function setSidebarOpen(open, persist = false) {\n    if (open) openSidebar(currentWidth);\n    else closeSidebar();\n    if (persist) {\n      try { chrome.storage.local.set({ [KEY_OPEN]: !!open }); } catch (_) {}\n    }\n    return { open: !!open };\n  }\n\n  function toggleSidebar() {\n    const next = !document.getElementById(HOST_ID);\n    return setSidebarOpen(next, true);\n  }\n\n  window.__a2rToggleSidebar = toggleSidebar;\n\n  if (window.__a2rSlimSidebarLoaded) return;\n  window.__a2rSlimSidebarLoaded = true;\n\n  let lastPing = 0;\n  function notifyActivity() {\n    const now = Date.now();\n    if (now - lastPing < 2000) return;\n    lastPing = now;\n    try {\n      chrome.runtime.sendMessage({ type: "A2R_USER_ACTIVITY" }).catch(() => {});\n    } catch (_) {}\n  }\n\n  ["mousedown", "pointerdown", "click", "keydown", "input", "wheel", "scroll", "mousemove", "touchstart"].forEach((evName) => {\n    window.addEventListener(evName, notifyActivity, { passive: true, capture: true });\n  });\n\n  // v2.9.5: عدّاد الرجوع للبوابة بقى هنا في الصفحة نفسها (كروم 115 بيوقف خلفية الإضافة بعد ~30 ثانية فكانت بتنسى العد).\n  // التاب الظاهر بس هو اللي بيعدّ، ولما الوقت يخلص يبلّغ الخلفية وهي تتأكد من آخر نشاط محفوظ قبل ما ترجّع للبوابة.\n  let localLastAct = Date.now();\n  let idleDueSent = false;\n  let idleSecSetting = 40;\n  function markLocalActivity() { localLastAct = Date.now(); idleDueSent = false; }\n  ["mousedown", "pointerdown", "keydown", "input", "wheel", "scroll", "mousemove", "touchstart"].forEach((evName) => {\n    window.addEventListener(evName, markLocalActivity, { passive: true, capture: true });\n  });\n  document.addEventListener("visibilitychange", () => { if (!document.hidden) markLocalActivity(); });\n  try {\n    chrome.storage.local.get({ a2r_idle_sec: 40 }, (res) => {\n      if (chrome.runtime.lastError) return;\n      const v = Number(res.a2r_idle_sec);\n      idleSecSetting = isNaN(v) ? 40 : v;\n    });\n  } catch (_) {}\n  setInterval(() => {\n    try {\n      if (document.hidden || !idleSecSetting || idleDueSent) return;\n      if (location.hostname === PORTAL_HOST) return;\n      if (Date.now() - localLastAct < idleSecSetting * 1000) return;\n      idleDueSent = true;\n      chrome.runtime.sendMessage({ type: "A2R_IDLE_DUE" }).catch(() => {});\n    } catch (_) {}\n  }, 1000);\n\n  // الفتح التلقائي: على بوابة المرور + المواقع المثبتة فقط (بدل كل المواقع)\n  let lastOpenEnabled = true;\n  let pinnedSites = {};\n  function siteAllowed() {\n    const host = location.hostname;\n    return host === PORTAL_HOST || !!pinnedSites[host];\n  }\n  try {\n    chrome.storage.local.get({ [KEY_OPEN]: true, [KEY_WIDTH]: 0, [KEY_SITES]: {}, [KEY_SIDE]: "right", a2r_lang: "ar" }, (res) => {\n      side = res[KEY_SIDE] === "left" ? "left" : "right";\n      handleLang = res.a2r_lang === "en" ? "en" : "ar";\n      if (chrome.runtime.lastError) return;\n      currentWidth = Number(res[KEY_WIDTH]) > 0 ? clampWidth(res[KEY_WIDTH]) : autoWidth();\n      lastOpenEnabled = res[KEY_OPEN] !== false;\n      pinnedSites = res[KEY_SITES] || {};\n      if (lastOpenEnabled && siteAllowed()) {\n        openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  // Live sync open/close state and resized width across ALL open tabs simultaneously\n  try {\n    chrome.storage.onChanged.addListener((changes, area) => {\n      if (area !== "local") return;\n      if (changes[KEY_SIDE]) setSide(changes[KEY_SIDE].newValue);\n      if (changes.a2r_lang) {\n        handleLang = changes.a2r_lang.newValue === "en" ? "en" : "ar";\n        if (currentHandle) currentHandle.title = handleLang === "en" ? HANDLE_EN : HANDLE_AR;\n      }\n      if (changes[KEY_WIDTH] && changes[KEY_WIDTH].newValue !== undefined) {\n        applyWidth(changes[KEY_WIDTH].newValue);\n      }\n      if (changes[KEY_OPEN] && changes[KEY_OPEN].newValue !== undefined) {\n        lastOpenEnabled = changes[KEY_OPEN].newValue !== false;\n        if (changes[KEY_OPEN].newValue) openSidebar(currentWidth);\n        else closeSidebar();\n      }\n      if (changes.a2r_idle_sec) {\n        const v = Number(changes.a2r_idle_sec.newValue);\n        idleSecSetting = isNaN(v) ? 40 : v;\n      }\n      if (changes[KEY_SITES]) {\n        pinnedSites = changes[KEY_SITES].newValue || {};\n        if (!siteAllowed()) closeSidebar();\n        else if (lastOpenEnabled) openSidebar(currentWidth);\n      }\n    });\n  } catch (_) {}\n\n  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {\n    if (!msg) return;\n    if (msg.type === "A2R_TOGGLE_SIDEBAR") {\n      sendResponse(toggleSidebar());\n      return true;\n    }\n    if (msg.type === "A2R_SET_SIDEBAR") {\n      if (Number(msg.width) > 0) currentWidth = clampWidth(msg.width);\n      sendResponse(setSidebarOpen(!!msg.open, false));\n      return true;\n    }\n  });\n\n  window.addEventListener("message", (ev) => {\n    if (!ev || !ev.data) return;\n    // v2.9.5: أي رسالة مش جاية من إطار الشريط بتاع الإضافة بتتجاهل (صفحة غريبة ماتقدرش تقفل الشريط أو تثبّت مواقع)\n    if (!sidebarFrame || ev.source !== sidebarFrame.contentWindow || (EXT_ORIGIN && ev.origin !== EXT_ORIGIN)) return;\n    if (ev.data.type === "A2R_TOGGLE_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          const fixed = host === PORTAL_HOST;\n          if (!fixed) {\n            if (sites[host]) { delete sites[host]; closeSidebar(); }\n            else sites[host] = true;\n            pinnedSites = sites;\n            chrome.storage.local.set({ [KEY_SITES]: sites });\n          }\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: fixed || !!sites[host], fixed }, EXT_ORIGIN || "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_QUERY_SITE") {\n      const host = location.hostname;\n      try {\n        chrome.storage.local.get({ [KEY_SITES]: {} }, (res) => {\n          const sites = res[KEY_SITES] || {};\n          if (ev.source) ev.source.postMessage({ type: "A2R_SITE_STATE", pinned: host === PORTAL_HOST || !!sites[host], fixed: host === PORTAL_HOST }, EXT_ORIGIN || "*");\n        });\n      } catch (_) {}\n      return;\n    }\n    if (ev.data.type === "A2R_CLOSE_SIDEBAR") {\n      setSidebarOpen(false, true);\n    } else if (ev.data.type === "A2R_USER_ACTIVITY") {\n      markLocalActivity();\n      notifyActivity();\n    }\n  });\n})();\n'}
+_CHROME_EXT_BIN_FILES = {
+    'icons/icon16.png': 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAADIUlEQVR42k2TW28UZQCGn++bme7u0J3uTrft9gAptAKVQ0lqiAEhniDqhVz5C/wJeieX/gZvDCam0R/QeCAoomLDRdEEKwIttHTb0sMeOt2dmZ3z50UT9b1/nufqFTdufK7434QQeL6HEGAWDpEpEIlPJgww8kiVgvoP0QGUUigUmtBothp04haGoRHGQwyaKdcGllj388zXhxGmRabp/8Z0gFwuhxCCenOHbtZBMyRCE0TSY8yBr6OjBJUy4YhNKHuZ7G6RCI04ig4ES0vL7O232HU3GBs5TH/JJowCGvU1dD3P4YFxbve9ye7yY7L9GvXdRapDg4yMjqJHccRPt39mef0Rnr7HlYtXKZ8pMzf3Dasr20xU4OOpkxz3xrn/w0224hzf+gHTjVnOX34bGYUxYRRg22VMo0iURWzUazx89ogTM9Ncy5lszD/H3vqRD93vOGELPj2bEpBjdeUpMggCPN/FrvZRKORxWvtYlsWVNy5zcuIUr4wmzNRC7lrvUzUD3ml8z2BiYQYeCQLpeR4gKeZKGIZGp+NS7rV57613cZw6N+84zI1+QFYZxdk0mCw6fNH+lVgvcO7MqQNBmqQgFFkkcNseGBlrq5vcu3cXvVhCnH6dvqRFflux0CeZnEqIlUEYBsh2p02up4cHfz3A9V1SGZNlGff//J1uc5/CR1e5NNHg+NYifw91sXyDI9l5hJ7w7OkKuu/5CCmZeull1jZXCcKAF+vbrK3XsAcGKK/H6C9uMZYd47FnMbkAXj5D5XvQpYZsNlv4vseFmdewShau12G19hyn7RClbX678wdf3XJJcxX6exW/DCfUSiVUEOAHAeL69U+U3/U5Nn6UJ7WH7DR2qFT6cTyHnlQjGr6EZRfRqmc5vfYZdTuj2J5mc7NGoZBHzM5+qYQQpGmKs+fgpi2EBqSAbnIh8Fg8co6GbfKqucD2k2GEbmAYGlmm0MMwRCmFlJJ8IU/XKRCELkpGZLFA9aZcdObZ8grsJRaRBD2NiePo4ExCCIQQABiGQXWoShiEuN19dN2keSimqRLqST+6ITFEilIg5QHzD2xtghGyFQRPAAAAAElFTkSuQmCC',
+    'icons/icon48.png': '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',
+    'icons/icon128.png': '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',
+}
+
+def ensure_chrome_extension_extracted():
+    """ينشئ/يحدّث مجلد إضافة كروم A2R (الشريط الجانبي + إدارة التبويبات) داخل مجلد الأرشيف الاحتياطي المخفي في Documents."""
+    try:
+        import base64
+        os.makedirs(ARCHIVE_BACKUP_DIR, exist_ok=True)
+        _hide_path(ARCHIVE_BACKUP_DIR)
+        os.makedirs(os.path.join(CHROME_EXT_DIR, "icons"), exist_ok=True)
+        _files = dict(_CHROME_EXT_TEXT_FILES)
+        # v96: الكود السري للجسر (مش ضمن ملفات الإضافة اللي أي موقع يقدر يقراها)
+        _files["config.js"] = ("// A2R Console " + APP_VERSION + " — اتكتب أوتوماتيك من البرنامج. ماتغيّروش.\n"
+                               "const A2R_BRIDGE_TOKEN = " + json.dumps(bridge_token()) + ";\n")
+        for rel, content in _files.items():
+            fp = os.path.join(CHROME_EXT_DIR, rel)
+            raw = content.encode("utf-8")
+            need = (not os.path.exists(fp)) or (os.path.getsize(fp) != len(raw))
+            if not need:
+                try:
+                    with open(fp, "rb") as fh:
+                        need = (fh.read() != raw)
+                except Exception:
+                    need = True
+            if need:
+                with open(fp, "wb") as fh:
+                    fh.write(raw)
+        for rel, b64s in _CHROME_EXT_BIN_FILES.items():
+            fp = os.path.join(CHROME_EXT_DIR, rel)
+            raw = base64.b64decode(b64s)
+            need = (not os.path.exists(fp)) or (os.path.getsize(fp) != len(raw))
+            if not need:
+                try:
+                    with open(fp, "rb") as fh:
+                        need = (fh.read() != raw)
+                except Exception:
+                    need = True
+            if need:
+                with open(fp, "wb") as fh:
+                    fh.write(raw)
+        return CHROME_EXT_DIR
+    except Exception as e:
+        log_exception("ensure_chrome_extension_extracted", e)
+        return ""
+
+def build_summary_pdf_file(info, pdf_path, chosen_unit, chosen_tid):
+    """يبني إيصال ملخص الفحص PDF (نفس تصميم البرنامج الرسمي) للاستخدام من البرنامج والإضافة معًا.
+    v96: الرسم كله في render_summary_slip (مكان واحد بدل 3 نسخ)."""
+    return render_summary_slip(
+        pdf_path, title="إيصال ملخص الفحص", subtitle=f"A2R Operations Console {APP_VERSION}",
+        unit_label=info.get('unit', '-'), date_label=info.get('date_label', '-'),
+        total_count=info.get('total_count', 0), pdf_count=info.get('pdf_count', 0),
+        manual_count=info.get('manual_count', 0), void_count=info.get('void_count', 0),
+        total_sum=info.get('total_sum', 0), chosen_unit=chosen_unit, chosen_tid=chosen_tid,
+        footer_top=f"Printed: {datetime.datetime.now().strftime('%Y-%m-%d  %H:%M:%S')}",
+        footer_bottom=f"Alexandria • {APP_OWNER} • {APP_VERSION}")
+
+
+def start_local_chrome_bridge(app):
+    """جسر محلي خفيف يعمل على 127.0.0.1:47221 فقط (أوفلاين بالكامل) لربط الشريط الجانبي لكروم ببرنامج A2R بدون حذف أي ميزة."""
+    try:
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import urlparse, parse_qs
+    except Exception as e:
+        log_exception("bridge_import", e)
+        return None
+
+    # v96: اتشالت صلاحية المشرف العامة القديمة (كانت شغالة لأي طلب لحد ما البرنامج يتقفل)
+    _token = bridge_token()
+    _sup_sessions = {}                     # v96: مفتاح مشرف لكل شريط، بيخلص بعد 15 دقيقة من آخر استخدام
+    _SUP_TTL = 15 * 60
+    _sup_lock = threading.Lock()
+
+    def _sup_ok(key):
+        key = str(key or "")
+        if not key:
+            return False
+        now = time.time()
+        with _sup_lock:
+            for k in [k for k, exp in _sup_sessions.items() if exp < now]:
+                _sup_sessions.pop(k, None)
+            if key not in _sup_sessions:
+                return False
+            _sup_sessions[key] = now + _SUP_TTL
+            return True
+
+    def _sup_new():
+        key = secrets.token_urlsafe(18)
+        with _sup_lock:
+            _sup_sessions[key] = time.time() + _SUP_TTL
+        return key
+
+    class _A2RBridgeHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def _send_json(self, data, code=200):
+            body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # v96: بدل "*" — السماح لإضافات كروم بس، أي موقع تاني مايقدرش يقرا ردود البرنامج
+            self._ext_cors_headers()
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _ext_cors_headers(self):
+            # v97: كروم وإيدج الاتنين (إيدج بيستخدم نفس chrome-extension://؛ extension:// احتياطي) — والكود السري لسه مطلوب
+            origin = (self.headers.get("Origin") or "").strip()
+            if origin.startswith(_EXT_ORIGINS):
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Vary", "Origin")
+
+        def do_OPTIONS(self):
+            # v96: الرد بالسماح لإضافة كروم بس (لو كروم بعت سؤال قبل الطلب)، وأي موقع تاني مرفوض
+            origin = (self.headers.get("Origin") or "").strip()
+            if not origin.startswith(_EXT_ORIGINS):
+                self.send_response(403)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            self.send_response(204)
+            self._ext_cors_headers()
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, X-A2R-Token, X-A2R-Sup")
+            self.send_header("Access-Control-Allow-Private-Network", "true")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _is_sup(self):
+            return bool(app.is_supervisor or _sup_ok(self.headers.get("X-A2R-Sup", "")))
+
+        def _allowed(self, path, is_post):
+            """v96: الجسر بيرد على إضافة A2R بس: ممنوع أي Origin غير chrome-extension، ولازم الكود السري
+            في كل طلب (ماعدا ping وفتح PDF الإيصال في تاب جديد، لأنهم بيتفتحوا كرابط عادي ومفيش موقع يقدر يقرا ردهم)."""
+            origin = (self.headers.get("Origin") or "").strip()
+            if origin and not origin.startswith(_EXT_ORIGINS):
+                self._send_json({"ok": False, "error": "forbidden"}, 403)
+                return False
+            if not is_post and path in ("/api/ping", "/api/pdf"):
+                return True
+            tok = self.headers.get("X-A2R-Token", "") or ""
+            if not tok or not hmac.compare_digest(str(tok).encode("utf-8", "replace"), _token.encode("utf-8")):
+                self._send_json({"ok": False, "error": "token"}, 401)
+                return False
+            if is_post:
+                ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype not in ("application/json", ""):
+                    self._send_json({"ok": False, "error": "content-type"}, 415)
+                    return False
+            return True
+
+        def _read_body(self):
+            try:
+                n = int(self.headers.get("Content-Length", "0") or 0)
+                if n <= 0 or n > 1_000_000:
+                    return {}
+                return json.loads(self.rfile.read(n).decode("utf-8", "replace"))
+            except Exception:
+                return {}
+
+        def _find_rec(self, fname):
+            if not fname:
+                return None
+            for r in list(app.last_detailed_records or []):
+                if r.get("file") == fname or os.path.basename(r.get("path", "")) == fname:
+                    return r
+            return None
+
+        def do_GET(self):
+            try:
+                parsed = urlparse(self.path)
+                p = parsed.path
+                qs = parse_qs(parsed.query)
+                if not self._allowed(p, False):
+                    return
+
+                if p == "/api/ping":
+                    return self._send_json({"ok": True, "version": APP_VERSION, "owner": APP_OWNER})
+
+                if p == "/api/pdf":
+                    fn = os.path.basename((qs.get("file", [""])[0] or "").strip())
+                    if not fn or not fn.lower().endswith(".pdf"):
+                        return self._send_json({"ok": False, "error": "invalid file"}, 400)
+                    fpath = os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, fn)
+                    if not os.path.exists(fpath):
+                        rec = self._find_rec(fn)
+                        fpath = (rec or {}).get("path", "")
+                    if not fpath or not os.path.exists(fpath):
+                        return self._send_json({"ok": False, "error": "not found"}, 404)
+                    with open(fpath, "rb") as fh:
+                        pdf_bytes = fh.read()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/pdf")
+                    self.send_header("Content-Disposition", f'inline; filename="{fn}"')
+                    self.send_header("Content-Length", str(len(pdf_bytes)))
+                    self.send_header("X-Content-Type-Options", "nosniff")
+                    self.end_headers()
+                    self.wfile.write(pdf_bytes)
+                    return
+
+                if p == "/api/status":
+                    info = dict(app.last_summary_info or {})
+                    # v96: قيم الشاشة بتتقري من نسخة بيحدّثها الخيط الرئيسي (Tk مش آمن من خيط الجسر)
+                    _snap = dict(getattr(app, "_bridge_snap", None) or {})
+                    try:
+                        _prog = float(_snap.get("progress", 0.0))
+                    except Exception:
+                        _prog = 0.0
+                    cur_date = _snap.get("date") or datetime.date.today().isoformat()
+                    return self._send_json({
+                        "ok": True,
+                        "version": APP_VERSION,
+                        "lang": "en" if CURRENT_LANG == "en" else "ar",  # v97: الإضافة بتمشي على لغة البرنامج
+                        "date": cur_date,
+                        "folder": app._watch_path or DEFAULT_RECEIPTS_DIR,
+                        "auto_print": bool(app.auto_print_enabled),
+                        "auto_sync": bool(app.auto_sync_enabled),
+                        "printed_today": int(app.printed_count_today or 0),
+                        "is_processing": bool(app.is_processing),
+                        "progress": _prog,
+                        "is_supervisor": self._is_sup(),
+                        "archive_done_today": bool(app._archive_done_today()),
+                        "archive_time": app._archive_done_time(),
+                        "summary": {
+                            "total_count": int(info.get("total_count", 0)),
+                            "total_sum": float(info.get("total_sum", 0.0)),
+                            "pdf_count": int(info.get("pdf_count", 0)),
+                            "manual_count": int(info.get("manual_count", 0)),
+                            "void_count": int(info.get("void_count", 0)),
+                            "void_sum": float(info.get("void_sum", 0.0)),
+                            "duplicates": int(info.get("duplicates", 0)),
+                            "unit": info.get("unit", UNSPEC),
+                            "date_label": info.get("date_label", ""),
+                        },
+                        "units": UNITS_LIST,
+                        "terminals": UNIT_TERMINALS,
+                        "employees": EMPLOYEES_LIST,
+                    })
+
+                if p == "/api/records":
+                    out = []
+                    for i, r in enumerate(list(app.last_detailed_records or []), 1):
+                        out.append({
+                            "idx": i,
+                            "unit": r.get("unit", "-"),
+                            "plate": r.get("plate", "-"),
+                            "insured": r.get("insured", "-"),
+                            "amount": float(r.get("amount", 0.0)),
+                            "time": r.get("time", "-"),
+                            "chassis": r.get("chassis", "-"),
+                            "motor": r.get("motor", "-"),
+                            "file": r.get("file", ""),
+                            "status_text": r.get("status_text", ""),
+                            "kind": r.get("kind", "ok"),
+                            "is_void": bool(r.get("is_void", False)),
+                            "is_manual": bool(r.get("is_manual", False)),
+                        })
+                    return self._send_json({"ok": True, "records": out})
+
+                if p == "/api/archive/days":
+                    is_adm = self._is_sup()
+                    cutoff = "" if is_adm else (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+                    stats = archive_day_stats(archive_load_rows())
+                    if cutoff:
+                        stats = [x for x in stats if x["day"] >= cutoff]
+                    return self._send_json({"ok": True, "days": stats[:60]})
+
+                if p == "/api/archive/search":
+                    q = (qs.get("q", [""])[0] or "").strip()
+                    is_adm = self._is_sup()
+                    cutoff = "" if is_adm else (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+                    rows = archive_search(q, include_void=True, limit=120, min_day=cutoff)
+                    out = []
+                    for row in rows:
+                        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = row[:10]
+                        out.append({
+                            "path": path, "day": day, "file": fname, "unit": unit,
+                            "plate": plate, "insured": insured, "amount": float(amount),
+                            "time": rtime, "is_manual": bool(is_manual), "is_void": bool(is_void),
+                        })
+                    return self._send_json({"ok": True, "results": out})
+
+                return self._send_json({"ok": False, "error": "not found"}, 404)
+            except Exception as e:
+                log_exception("bridge_get", e)
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+
+        def do_POST(self):
+            try:
+                p = urlparse(self.path).path
+                if not self._allowed(p, True):
+                    return
+                data = self._read_body()
+                if not isinstance(data, dict):
+                    data = {}
+
+                if p == "/api/scan":
+                    d_str = (data.get("date") or "").strip()
+                    td = parse_flex_date(d_str) or datetime.date.today()
+                    folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    if not os.path.isdir(folder):
+                        return self._send_json({"ok": False, "error": "مجلد الإيصالات غير موجود"})
+                    if not os.path.exists(PDFTOTEXT_EXE):
+                        return self._send_json({"ok": False, "error": "pdftotext.exe غير موجود"})
+                    if not app.processing_lock.acquire(blocking=False):
+                        return self._send_json({"ok": False, "error": "جاري الفحص بالفعل..."})
+                    try:
+                        app.is_processing = True
+                        recs = collect_records(folder, td)
+                        date_label = td.strftime("%d.%m.%Y")
+                        if not recs:
+                            app.run_on_main(app.clear_results)
+                            return self._send_json({"ok": False, "error": f"لا توجد إيصالات بتاريخ {date_label}"})
+                        device_unit = annotate_records(recs)
+                        info, units_summary = build_summary(recs, device_unit, date_label)
+                        report_path = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{td.strftime('%d-%m-%Y')}.xlsx")
+                        out_file = write_report(recs, report_path) if OPENPYXL_AVAILABLE else report_path
+                        app.last_generated_file = out_file
+                        app.system_total_sum = info["total_sum"]
+                        app.last_detailed_records = recs
+                        app.last_units_summary = units_summary
+                        app.last_summary_info = info
+                        def _sync_ui():
+                            try:
+                                app.cb_d.set(f"{td.day:02d}")
+                                app.cb_m.set(f"{td.month:02d}")
+                                app.cb_y.set(str(td.year))
+                                app.progress_bar.set(1.0)
+                                app.lbl_progress_pct.configure(text="100%")
+                                app.lbl_cnt.configure(text=f"{info['total_count']:,}")
+                                app.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+                                app._render_status_bar(info['total_count'], info['total_sum'])
+                                app.check_pos()
+                            except Exception as _e:
+                                _log_silent("bridge_scan_ui", _e)
+                        app.run_on_main(_sync_ui)
+                        return self._send_json({
+                            "ok": True, "total_count": info["total_count"], "total_sum": info["total_sum"]
+                        })
+                    finally:
+                        app.is_processing = False
+                        if app.processing_lock.locked():
+                            app.processing_lock.release()
+
+                if p == "/api/toggle":
+                    def _apply_sw():
+                        try:
+                            if "auto_print" in data:
+                                app.auto_print_enabled = bool(data["auto_print"])
+                                if app.auto_print_enabled: app.sw_autoprint.select()
+                                else: app.sw_autoprint.deselect()
+                            if "auto_sync" in data:
+                                app.auto_sync_enabled = bool(data["auto_sync"])
+                                if app.auto_sync_enabled: app.sw_autosync.select()
+                                else: app.sw_autosync.deselect()
+                            app.update_toggle_appearance()
+                        except Exception as _e:
+                            _log_silent("bridge_toggle", _e)
+                    app.run_on_main(_apply_sw)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/reprint_last":
+                    target = app.last_printed_pdf if (app.last_printed_pdf and os.path.exists(app.last_printed_pdf)) else None
+                    if not target:
+                        folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                        today_d = datetime.date.today()
+                        best_mt, best_p = 0.0, None
+                        if os.path.isdir(folder):
+                            with os.scandir(folder) as it:
+                                for ent in it:
+                                    if not ent.is_file(): continue
+                                    fl = ent.name.lower()
+                                    if not fl.endswith(".pdf") or fl.endswith(("_cropped.pdf", "_summary.pdf")): continue
+                                    if not (fl.startswith("quote_receipt_") or MANUAL_NAME_RE.match(ent.name)): continue
+                                    if ent.name.lstrip("_") in _VOID_KEYS: continue
+                                    st = ent.stat()
+                                    if datetime.date.fromtimestamp(st.st_mtime) == today_d and st.st_mtime > best_mt:
+                                        best_mt, best_p = st.st_mtime, ent.path
+                        target = best_p
+                    if not target or not os.path.exists(target):
+                        return self._send_json({"ok": False, "error": "لا يوجد إيصال مطبوع اليوم"})
+                    app.last_printed_pdf = target
+                    ok = app.send_to_thermal_printer_57x90(target)
+                    return self._send_json({"ok": bool(ok)})
+
+                if p == "/api/reprint":
+                    rec = self._find_rec(data.get("file", ""))
+                    fpath = (rec or {}).get("path", "") or os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, data.get("file", ""))
+                    fpath = _bridge_safe_path(app, fpath, (".pdf",))   # v96: إيصالات بس
+                    if not fpath:
+                        return self._send_json({"ok": False, "error": "الملف غير موجود"})
+                    ok = app.send_to_thermal_printer_57x90(fpath)
+                    return self._send_json({"ok": bool(ok)})
+
+                if p == "/api/open_file":
+                    fpath = (data.get("path") or "").strip()
+                    if not fpath:
+                        rec = self._find_rec(data.get("file", ""))
+                        fpath = (rec or {}).get("path", "") or os.path.join(app._watch_path or DEFAULT_RECEIPTS_DIR, data.get("file", ""))
+                    fpath = _bridge_safe_path(app, fpath)   # v96: فولدر الإيصالات/الأرشيف/التقارير بس
+                    if fpath:
+                        os.startfile(fpath)
+                        return self._send_json({"ok": True})
+                    return self._send_json({"ok": False, "error": "الملف غير موجود"})
+
+                if p == "/api/void":
+                    rec = self._find_rec(data.get("file", ""))
+                    if not rec:
+                        return self._send_json({"ok": False, "error": "المعاملة غير موجودة"})
+                    key = void_key(rec.get("file", "") or rec.get("path", ""))
+                    reason = (data.get("reason") or "").strip()
+                    add_void(key, rec["amount"], rec.get("plate", "-"), reason)
+                    rec["is_void"] = True
+                    rec["void_reason"] = reason
+                    app.run_on_main(app.refresh_after_void_change)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/unvoid":
+                    rec = self._find_rec(data.get("file", ""))
+                    if not rec:
+                        return self._send_json({"ok": False, "error": "المعاملة غير موجودة"})
+                    remove_void(void_key(rec.get("file", "") or rec.get("path", "")))
+                    rec["is_void"] = False
+                    rec["void_reason"] = ""
+                    app.run_on_main(app.refresh_after_void_change)
+                    return self._send_json({"ok": True})
+
+                if p == "/api/manual":
+                    amt = parse_manual_amount(data.get("amount"))
+                    if amt is None:
+                        return self._send_json({"ok": False, "error": "مبلغ غير صالح"})
+                    if not REPORTLAB_AVAILABLE:
+                        return self._send_json({"ok": False, "error": "ReportLab غير مثبت"})
+                    dest = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    file_base, now_dt = unique_manual_filename(dest, amt, datetime.datetime.now())
+                    full_path = os.path.join(dest, file_base)
+                    u_val = (data.get("unit") or "").strip() or "-"
+                    p_val = (data.get("plate") or "").strip() or "-"
+                    n_val = (data.get("insured") or "").strip() or "-"
+                    app.printed_receipts_set.add(file_base)
+                    create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
+                    try:
+                        conn = db_connect()
+                        try:
+                            conn.execute(
+                                "INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+                                (u_val, p_val, n_val, amt, now_dt.strftime("%d-%m-%Y %H%M%S"), file_base),
+                            )
+                            conn.commit()
+                        finally:
+                            conn.close()
+                    except Exception as ex_db:
+                        log_exception("bridge_manual_db", ex_db)
+                    if app.auto_print_enabled:
+                        try: app._print_queue.put(full_path)
+                        except Exception as _e: _log_silent("bridge_manual_print", _e)
+                    return self._send_json({"ok": True, "amount": amt, "file": file_base, "pdf_url": f"http://{LOCAL_BRIDGE_HOST}:{LOCAL_BRIDGE_PORT}/api/pdf?file={file_base}"})
+
+                if p == "/api/slip":
+                    emp_val = (data.get("emp") or "").strip()
+                    unit_val = (data.get("unit") or "").strip()
+                    tid_val = UNIT_TERMINALS.get(unit_val, "")
+                    date_val = datetime.date.today().strftime("%d/%m/%Y")
+                    def _print_slip_bg():
+                        try:
+                            pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+                            if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
+                                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                                if not os.path.exists(sumatra_path):
+                                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                                if os.path.exists(sumatra_path):
+                                    subprocess.run(
+                                        [sumatra_path, "-print-to-default", "-print-settings", "shrink", "-silent", pdf_path],
+                                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90
+                                    )
+                                elif sys.platform == "win32":
+                                    os.startfile(pdf_path, "print")
+                        except Exception as e:
+                            log_exception("bridge_slip_bg", e)
+                    threading.Thread(target=_print_slip_bg, daemon=True).start()
+                    return self._send_json({"ok": True})
+
+                if p == "/api/archive_now":
+                    folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                    moved = app._run_archive_sweep(folder)
+                    if moved is None:
+                        return self._send_json({"ok": False, "error": "الأرشفة تعمل بالفعل"})
+                    app._mark_archive_done_today()
+                    app._start_archive_maintenance(folder)
+                    app.run_on_main(app._refresh_mini_archive_label)
+                    return self._send_json({"ok": True, "moved": int(moved or 0)})
+
+                if p == "/api/open_app":
+                    app.show_from_system_tray()
+                    return self._send_json({"ok": True})
+
+                if p == "/api/summary_pdf":
+                    if not REPORTLAB_AVAILABLE:
+                        return self._send_json({"ok": False, "error": "ReportLab غير مثبت"})
+                    unit = (data.get("unit") or "").strip()
+                    if unit not in UNIT_TERMINALS:
+                        return self._send_json({"ok": False, "error": "يرجى اختيار الوحدة أولاً"})
+                    tid = UNIT_TERMINALS.get(unit, "")
+                    # لو الفحص لسه متعملش النهارده نعمله تلقائيًا قبل الطباعة
+                    if not app.last_summary_info:
+                        td = datetime.date.today()
+                        folder = app._watch_path or DEFAULT_RECEIPTS_DIR
+                        if os.path.isdir(folder) and os.path.exists(PDFTOTEXT_EXE) and app.processing_lock.acquire(blocking=False):
+                            try:
+                                recs = collect_records(folder, td)
+                                if recs:
+                                    du = annotate_records(recs)
+                                    info_, us_ = build_summary(recs, du, td.strftime("%d.%m.%Y"))
+                                    rp = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{td.strftime('%d-%m-%Y')}.xlsx")
+                                    app.last_generated_file = write_report(recs, rp) if OPENPYXL_AVAILABLE else rp
+                                    app.system_total_sum = info_["total_sum"]
+                                    app.last_detailed_records = recs
+                                    app.last_units_summary = us_
+                                    app.last_summary_info = info_
+                            finally:
+                                if app.processing_lock.locked():
+                                    app.processing_lock.release()
+                    if not app.last_summary_info:
+                        return self._send_json({"ok": False, "error": "لا توجد إيصالات اليوم لعمل الملخص"})
+                    info = dict(app.last_summary_info)
+                    day_iso = _day_iso_from_label(info.get("date_label", "")) or datetime.date.today().isoformat()
+                    summary_unit_save(day_iso, unit, tid)
+                    app.run_on_main(lambda _d=day_iso: app._refresh_archive_day_summary(_d))   # v96: بيقرا خانة المسار من الشاشة
+                    base_file = app.last_generated_file or os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{datetime.date.today().strftime('%d-%m-%Y')}.xlsx")
+                    pdf_path = os.path.splitext(base_file)[0] + "_Summary.pdf"
+                    build_summary_pdf_file(info, pdf_path, unit, tid)
+                    printed = False
+                    if data.get("print", False):
+                        printed = bool(app.send_to_thermal_printer_57x90(pdf_path))
+                    if not printed:
+                        try: os.startfile(pdf_path)
+                        except Exception as _e: _log_silent("bridge_summary_open", _e)
+                    return self._send_json({"ok": True, "printed": printed, "path": pdf_path})
+
+                if p == "/api/auth":
+                    rem = sup_lock_remaining()
+                    if rem > 0:
+                        return self._send_json({"ok": False, "error": f"مقفول مؤقتًا ({rem}ث)"})
+                    val = (data.get("password") or "").strip().lower()
+                    if is_supervisor_password(val):
+                        sup_register_success()
+                        # v96: صلاحية للشريط اللي فتح بس، وبتقفل لوحدها بعد 15 دقيقة من غير استخدام
+                        return self._send_json({"ok": True, "is_supervisor": True, "sup_key": _sup_new()})
+                    sup_register_fail()
+                    return self._send_json({"ok": False, "error": "كلمة المرور غير صحيحة"})
+
+                return self._send_json({"ok": False, "error": "not found"}, 404)
+            except Exception as e:
+                log_exception("bridge_post", e)
+                return self._send_json({"ok": False, "error": str(e)}, 500)
+
+    try:
+        srv = ThreadingHTTPServer((LOCAL_BRIDGE_HOST, LOCAL_BRIDGE_PORT), _A2RBridgeHandler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        return srv
+    except Exception as e:
+        log_exception("start_local_chrome_bridge", e)
+        return None
+
+
+_FTS5_SUPPORTED = None
+
+def _has_fts5(conn):
+    global _FTS5_SUPPORTED
+    if _FTS5_SUPPORTED is not None:
+        return _FTS5_SUPPORTED
+    try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS archive_fts USING fts5(path UNINDEXED, search_text, tokenize='unicode61')")
+        _FTS5_SUPPORTED = True
+    except Exception as e:
+        _log_silent("fts5_init", e)
+        _FTS5_SUPPORTED = False
+    return _FTS5_SUPPORTED
+
+def _norm_fts_text(unit, plate, insured, fname, chassis, motor):
+    parts = [unit, plate, insured, fname, chassis, motor]
+    tokens = []
+    for p in parts:
+        s = clean_arabic(str(p or "")).lower()
+        for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+            s = s.replace(a, b)
+        s_sp = re.sub(r"[^0-9a-zء-ي]+", " ", s).strip()
+        s_cp = re.sub(r"\s+", "", s_sp)
+        if s_sp and s_sp != "-":
+            tokens.append(s_sp)
+        if s_cp and s_cp != s_sp and s_cp != "-":
+            tokens.append(s_cp)
+    return " ".join(tokens)
+
+def _ensure_archive_index():
+    conn = db_connect()
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS archive_index (
+            path TEXT PRIMARY KEY, day TEXT, file TEXT, unit TEXT, plate TEXT,
+            insured TEXT, amount REAL, rec_time TEXT, is_manual INTEGER,
+            is_void INTEGER, is_receipt INTEGER, mtime REAL, size INTEGER,
+            chassis TEXT DEFAULT '-', motor TEXT DEFAULT '-'
+        )
+    ''')
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(archive_index)").fetchall()}
+    if "chassis" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN chassis TEXT DEFAULT '-'")
+    if "motor" not in cols:
+        conn.execute("ALTER TABLE archive_index ADD COLUMN motor TEXT DEFAULT '-'")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_day ON archive_index(day)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_unit ON archive_index(unit)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_arch_amount ON archive_index(amount)")
+    if _has_fts5(conn):
+        fts_cnt = conn.execute("SELECT COUNT(*) FROM archive_fts").fetchone()[0]
+        rec_cnt = conn.execute("SELECT COUNT(*) FROM archive_index WHERE is_receipt = 1").fetchone()[0]
+        if rec_cnt > 0 and fts_cnt == 0:
+            rows = conn.execute(
+                "SELECT path, unit, plate, insured, file, IFNULL(chassis,'-'), IFNULL(motor,'-') "
+                "FROM archive_index WHERE is_receipt = 1").fetchall()
+            conn.executemany(
+                "INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                [(r[0], _norm_fts_text(r[1], r[2], r[3], r[4], r[5], r[6])) for r in rows]
+            )
+    conn.commit()
+    return conn
+
+def _archive_day_from_path(root, path):
+    try:
+        parts = os.path.relpath(path, root).split(os.sep)
+        if len(parts) < 4: return None
+        y, m, d = int(parts[0]), int(parts[1].split("-")[0]), int(parts[2])
+        return f"{y:04d}-{m:02d}-{d:02d}"
+    except Exception:
+        return None
+
+def archive_index_update(folder_path, progress=None):
+    """يفهرس إيصالات الأرشيف الجديدة فقط (الباقي يتخطاه) ويشيل المحذوف ويحدّث حالة الإلغاء."""
+    root = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    if not os.path.isdir(root): return 0
+    load_void_map()
+    manual_map = load_manual_map()
+    files = []
+    for dp, _dn, fns in os.walk(root):
+        for f in fns:
+            if not f.lower().endswith((".pdf", ".txt")): continue
+            if f.startswith("Samary_") or f.endswith("_cropped.pdf") or f.endswith("_Summary.pdf"): continue
+            p = os.path.join(dp, f)
+            day = _archive_day_from_path(root, p)
+            if day: files.append((p, day))
+
+    conn = _ensure_archive_index()
+    done_new = 0
+    try:
+        existing = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT path, mtime, size FROM archive_index")}
+        current = {p for p, _ in files}
+        stale = [(p,) for p in existing if p not in current]
+        use_fts = _has_fts5(conn)
+        if stale:
+            conn.executemany("DELETE FROM archive_index WHERE path = ?", stale)
+            if use_fts:
+                conn.executemany("DELETE FROM archive_fts WHERE path = ?", stale)
+
+        todo = []
+        for p, day in files:
+            try: st = os.stat(p)
+            except OSError: continue
+            old = existing.get(p)
+            if old and abs(old[0] - st.st_mtime) < 1 and old[1] == st.st_size: continue
+            todo.append((p, day, st))
+
+        def _read_one(item):
+            p_, day_, st_ = item
+            try:
+                if p_.lower().endswith(".txt"):
+                    return p_, day_, st_, read_txt_record(p_, datetime.date.fromisoformat(day_))
+                return p_, day_, st_, read_pdf_record(p_, manual_map)
+            except Exception as e:
+                log_exception(f"archive_index:{os.path.basename(p_)}", e)
+                return p_, day_, st_, None
+
+        def _store_one(p, day, st, rec):
+            fname = os.path.basename(p)
+            if rec:
+                ch = str(rec.get("chassis") or "-")
+                mo = str(rec.get("motor") or "-")
+                row = (p, day, fname, rec["unit"], rec["plate"], rec["insured"], float(rec["amount"]),
+                       rec["time"], int(bool(rec["is_manual"])), int(bool(rec["is_void"])), 1, st.st_mtime, st.st_size, ch, mo)
+            else:
+                ch, mo = "-", "-"
+                row = (p, day, fname, "", "-", "-", 0.0, "-", 0, 0, 0, st.st_mtime, st.st_size, ch, mo)
+            conn.execute(
+                "INSERT OR REPLACE INTO archive_index "
+                "(path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, is_receipt, mtime, size, chassis, motor) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+            if use_fts:
+                conn.execute("DELETE FROM archive_fts WHERE path = ?", (p,))
+                if rec:
+                    conn.execute("INSERT INTO archive_fts (path, search_text) VALUES (?, ?)",
+                                 (p, _norm_fts_text(rec["unit"], rec["plate"], rec["insured"], fname, ch, mo)))
+
+        total = len(todo)
+        if total > 3:
+            workers = min(4, max(2, os.cpu_count() or 2))
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                for i, fut in enumerate(as_completed([ex.submit(_read_one, it) for it in todo]), 1):
+                    p, day, st, rec = fut.result()
+                    _store_one(p, day, st, rec)
+                    done_new += 1
+                    if i % 40 == 0:
+                        conn.commit()
+                        if progress: progress(i, total)
+        else:
+            for i, it in enumerate(todo, 1):
+                p, day, st, rec = _read_one(it)
+                _store_one(p, day, st, rec)
+                done_new += 1
+                if i % 40 == 0:
+                    conn.commit()
+                    if progress: progress(i, total)
+        conn.commit()
+        if progress and total: progress(total, total)
+
+        # تحديث حالة الإلغاء (ممكن تتغير بعد الأرشفة)
+        upd = []
+        for p, fname, cur in conn.execute("SELECT path, file, is_void FROM archive_index WHERE is_receipt = 1").fetchall():
+            v = int(fname.startswith("_") or fname.lstrip("_") in _VOID_KEYS)
+            if v != cur: upd.append((v, p))
+        if upd:
+            conn.executemany("UPDATE archive_index SET is_void = ? WHERE path = ?", upd)
+        conn.commit()
+    finally:
+        conn.close()
+    return done_new
+
+def _backup_db_safely(db_dir, keep_days=14):
+    """نسخ القاعدة بأمان: فحص سلامة قبل النسخ، كتابة لملف مؤقت ثم استبدال ذري (النسخة السليمة القديمة
+    متتمسحش لو النسخ فشل)، ونسخة مؤرخة لكل يوم مع الاحتفاظ بآخر keep_days يوم."""
+    s_conn = db_connect()
+    try:
+        r = s_conn.execute("PRAGMA quick_check").fetchone()
+        if not r or r[0] != "ok":
+            log_exception("archive_backup_db", f"quick_check failed, backup skipped: {r}")
+            return False
+        latest = os.path.join(db_dir, "a2r_vault_backup.db")
+        tmp = latest + ".tmp"
+        if os.path.exists(tmp): os.remove(tmp)
+        d_conn = sqlite3.connect(tmp)
+        try: s_conn.backup(d_conn)
+        finally: d_conn.close()
+        os.replace(tmp, latest)
+    finally:
+        s_conn.close()
+    day = datetime.datetime.now().strftime("%Y%m%d")
+    dated = os.path.join(db_dir, f"a2r_vault_{day}.db")
+    dtmp = dated + ".tmp"
+    shutil.copy2(latest, dtmp)
+    os.replace(dtmp, dated)
+    olds = sorted(glob.glob(os.path.join(db_dir, "a2r_vault_????????.db")))
+    for p in olds[:-keep_days]:
+        try: os.remove(p)
+        except Exception as e: log_exception("archive_backup_prune", e)
+    return True
+
+def archive_backup(folder_path):
+    """نسخة احتياطية تراكمية للأرشيف في فولدر مخفي جوه فولدر تقارير البرنامج. مفيش حاجة بتتمسح من النسخة."""
+    src = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    if not os.path.isdir(src): return 0
+    os.makedirs(ARCHIVE_BACKUP_DIR, exist_ok=True)
+    _hide_path(ARCHIVE_BACKUP_DIR)
+    copied = 0
+    for dp, _dn, fns in os.walk(src):
+        rel = os.path.relpath(dp, src)
+        dst_dir = ARCHIVE_BACKUP_DIR if rel == "." else os.path.join(ARCHIVE_BACKUP_DIR, rel)
+        for f in fns:
+            if f.startswith("~"): continue          # ملفات مؤقتة (إكسيل بيتكتب دلوقتي)
+            s, d = os.path.join(dp, f), os.path.join(dst_dir, f)
+            try:
+                ss = os.stat(s)
+                if os.path.exists(d):
+                    ds = os.stat(d)
+                    if ds.st_size == ss.st_size and abs(ds.st_mtime - ss.st_mtime) < 2: continue
+                os.makedirs(dst_dir, exist_ok=True)
+                shutil.copy2(s, d)
+                copied += 1
+            except Exception as e:
+                log_exception(f"archive_backup:{f}", e)
+    # نسخة من قاعدة البيانات (الإلغاءات/اليدوي/الفهرس) جنب الأرشيف
+    try:
+        db_dir = os.path.join(ARCHIVE_BACKUP_DIR, "_db")
+        os.makedirs(db_dir, exist_ok=True)
+        _backup_db_safely(db_dir)
+    except Exception as e:
+        log_exception("archive_backup_db", e)
+    return copied
+
+def archive_maintenance(folder_path, progress=None, full=True):
+    """فهرسة + نسخ احتياطي. لو في عملية شغالة بالفعل بترجع None ومش بتتكرر.
+    full=False: فهرسة بس (للفتح السريع لنافذة الأرشيف) من غير نسخ احتياطي ولا بناء إكسيلات."""
+    if not _ARCHIVE_LOCK.acquire(blocking=False): return None
+    try:
+        n = archive_index_update(folder_path, progress)
+        b = archive_backup(folder_path) if full else 0
+        try: _archive_search_rows()
+        except Exception as e: log_exception("archive_search_warm", e)
+        if full:
+            try: archive_backfill_excels(folder_path)     # أي يوم مؤرشف ملوش إكسيل يتبني أوتوماتيك (الموجود بيتخطى)
+            except Exception as e: log_exception("archive_maintenance_excels", e)
+        return n, b
+    except Exception as e:
+        log_exception("archive_maintenance", e)
+        return None
+    finally:
+        _ARCHIVE_LOCK.release()
+
+def archive_load_rows():
+    conn = _ensure_archive_index()
+    try:
+        return conn.execute(
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void "
+            "FROM archive_index WHERE is_receipt = 1").fetchall()
+    finally:
+        conn.close()
+
+def archive_day_folder_from_index(day_iso):
+    """فولدر اليوم من الفهرس (لو اسم الشهر في الفولدر اتغير بسبب لغة الويندوز)."""
+    try:
+        conn = _ensure_archive_index()
+        try:
+            row = conn.execute("SELECT path FROM archive_index WHERE day = ? LIMIT 1", (day_iso,)).fetchone()
+        finally:
+            conn.close()
+        if row: return os.path.dirname(row[0])
+    except Exception as e:
+        log_exception("archive_day_folder_from_index", e)
+    return None
+
+def archive_day_stats(rows):
+    days = {}
+    for path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void in rows:
+        d = days.setdefault(day, {"day": day, "ops": 0, "total": 0.0, "manual": 0, "void": 0,
+                                  "dup": 0, "missing": 0, "_keys": Counter()})
+        if is_void:
+            d["void"] += 1
+            continue
+        d["ops"] += 1
+        d["total"] += amount
+        if is_manual: d["manual"] += 1
+        if amount <= 0 or (not is_manual and (plate in ("-", "") or unit in (UNSPEC, ""))):
+            d["missing"] += 1
+        if plate not in ("-", ""):
+            d["_keys"][(plate, rtime, round(amount, 2))] += 1
+    out = []
+    for d in days.values():
+        d["dup"] = sum(c - 1 for c in d["_keys"].values() if c > 1)
+        d.pop("_keys", None)
+        out.append(d)
+    out.sort(key=lambda x: x["day"], reverse=True)
+    return out
+
+def _norm_search(s):
+    s = clean_arabic(str(s or "")).lower()
+    for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+        s = s.replace(a, b)
+    return re.sub(r"[\s\-_]+", "", s)
+
+_ARCH_SEARCH_CACHE = {"sig": None, "rows": []}
+_ARCH_SEARCH_LOCK = threading.Lock()
+
+def _archive_search_rows():
+    """صفوف الأرشيف + النصوص المُطبَّعة (plate/insured/file/chassis/motor/unit) محسوبة مرة واحدة كـ Fallback."""
+    conn = _ensure_archive_index()
+    try:
+        sig = conn.execute("SELECT COUNT(*), IFNULL(SUM(mtime),0), IFNULL(SUM(is_void),0), "
+                           "IFNULL(SUM(amount),0) FROM archive_index").fetchone()
+        with _ARCH_SEARCH_LOCK:
+            if _ARCH_SEARCH_CACHE["sig"] == sig:
+                return _ARCH_SEARCH_CACHE["rows"]
+        rows = conn.execute(
+            "SELECT path, day, file, unit, plate, insured, amount, rec_time, is_manual, is_void, "
+            "IFNULL(chassis,'-'), IFNULL(motor,'-') "
+            "FROM archive_index WHERE is_receipt = 1").fetchall()
+    finally:
+        conn.close()
+    prepared = [
+        (r, _norm_search(r[4]), _norm_search(r[5]), _norm_search(r[2]),
+         _norm_search(r[10]), _norm_search(r[11]), _norm_search(r[3]))
+        for r in rows
+    ]
+    with _ARCH_SEARCH_LOCK:
+        _ARCH_SEARCH_CACHE["sig"] = sig
+        _ARCH_SEARCH_CACHE["rows"] = prepared
+    return prepared
+
+def _parse_amount_query(raw_q):
+    """يدعم مبلغ محدد (521.57) أو نطاق مبلغ (500-1000 أو 500..1000)."""
+    s = str(raw_q or "").strip().replace(",", "")
+    if not s:
+        return None, None
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:-|\.\.)\s*(\d+(?:\.\d+)?)", s)
+    if m:
+        lo, hi = float(m.group(1)), float(m.group(2))
+        return (lo, hi) if lo <= hi else (hi, lo)
+    try:
+        v = float(s)
+        return v - 0.005, v + 0.005
+    except Exception:
+        return None, None
+
+def archive_units_list(min_day=""):
+    conn = _ensure_archive_index()
+    try:
+        if min_day:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND day >= ? AND unit != '' ORDER BY unit",
+                (min_day,)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT DISTINCT unit FROM archive_index WHERE is_receipt = 1 AND unit != '' ORDER BY unit").fetchall()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+def archive_search(query="", include_void=True, limit=3000, min_day="", max_day="", unit_filter="", status_filter="all"):
+    raw_q = str(query or "").strip()
+    q_norm = _norm_search(raw_q)
+    amt_lo, amt_hi = _parse_amount_query(raw_q)
+    has_filter = bool(min_day or max_day or unit_filter or (status_filter and status_filter != "all"))
+    if not q_norm and amt_lo is None and not has_filter:
+        return []
+
+    where = ["a.is_receipt = 1"]
+    params = []
+    if not include_void and status_filter != "void":
+        where.append("a.is_void = 0")
+    if status_filter == "void":
+        where.append("a.is_void = 1")
+    elif status_filter == "manual":
+        where.append("a.is_void = 0 AND a.is_manual = 1")
+    elif status_filter == "ok":
+        where.append("a.is_void = 0 AND a.is_manual = 0")
+    if min_day:
+        where.append("a.day >= ?")
+        params.append(min_day)
+    if max_day:
+        where.append("a.day <= ?")
+        params.append(max_day)
+    if unit_filter:
+        where.append("a.unit = ?")
+        params.append(unit_filter)
+
+    conn = _ensure_archive_index()
+    try:
+        # 1. بحث بالفلاتر فقط أو بالمبلغ/النطاق مباشرة عبر فهرس SQLite
+        if not q_norm or amt_lo is not None:
+            sql_where = list(where)
+            sql_params = list(params)
+            if amt_lo is not None:
+                # لو رقم واحد: نطابق المبلغ أو نسمح بمطابقة جزء من اللوحة/الشاسيه/الملف
+                if abs(amt_hi - amt_lo) <= 0.02 and q_norm:
+                    pass  # هنكمل للبحث النصي + المبلغ تحت
+                else:
+                    sql_where.append("a.amount BETWEEN ? AND ?")
+                    sql_params.extend([amt_lo, amt_hi])
+                    sql = (
+                        "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                        "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                        "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                        " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                    )
+                    sql_params.append(limit)
+                    return conn.execute(sql, sql_params).fetchall()
+            else:
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(sql_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                sql_params.append(limit)
+                return conn.execute(sql, sql_params).fetchall()
+
+        # 2. بحث فوري عبر SQLite FTS5 (يدعم الكلمات المتعددة والبادئات) + مطابقة المبلغ لو رقم
+        if _has_fts5(conn):
+            raw_tokens = [t for t in re.split(r"[\s\-_]+", clean_arabic(raw_q).lower()) if t]
+            norm_tokens = []
+            for tk in raw_tokens:
+                for a, b in (("أ", "ا"), ("إ", "ا"), ("آ", "ا"), ("ى", "ي"), ("ة", "ه")):
+                    tk = tk.replace(a, b)
+                tk = re.sub(r"[^0-9a-zء-ي]", "", tk)
+                if tk:
+                    norm_tokens.append(tk)
+            if norm_tokens:
+                fts_match = " AND ".join(f'"{tk}"*' for tk in norm_tokens)
+                fts_where = list(where)
+                fts_params = list(params)
+                if amt_lo is not None:
+                    fts_where.append("(a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?) OR a.amount BETWEEN ? AND ?)")
+                    fts_params.extend([fts_match, amt_lo, amt_hi])
+                else:
+                    fts_where.append("a.path IN (SELECT path FROM archive_fts WHERE archive_fts MATCH ?)")
+                    fts_params.append(fts_match)
+                sql = (
+                    "SELECT a.path, a.day, a.file, a.unit, a.plate, a.insured, a.amount, a.rec_time, "
+                    "a.is_manual, a.is_void, IFNULL(a.chassis,'-'), IFNULL(a.motor,'-') "
+                    "FROM archive_index a WHERE " + " AND ".join(fts_where) +
+                    " ORDER BY a.day DESC, a.rec_time DESC LIMIT ?"
+                )
+                fts_params.append(limit)
+                rows = conn.execute(sql, fts_params).fetchall()
+                if rows:
+                    return rows
+    except Exception as e:
+        log_exception("archive_search_fts", e)
+    finally:
+        conn.close()
+
+    # 3. Fallback: بحث جزئي داخل الكلمة (substring) عبر الكاش المطبّع (مثلاً آخر 4 أرقام من الشاسيه)
+    out = []
+    for r, n_plate, n_insured, n_file, n_chassis, n_motor, n_unit in _archive_search_rows():
+        path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void, ch, mo = r
+        if is_void and not include_void and status_filter != "void": continue
+        if status_filter == "void" and not is_void: continue
+        if status_filter == "manual" and (is_void or not is_manual): continue
+        if status_filter == "ok" and (is_void or is_manual): continue
+        if min_day and day < min_day: continue
+        if max_day and day > max_day: continue
+        if unit_filter and unit != unit_filter: continue
+        hit = (q_norm in n_plate or q_norm in n_insured or q_norm in n_file
+               or q_norm in n_chassis or q_norm in n_motor or q_norm in n_unit)
+        if not hit and amt_lo is not None and amt_lo <= amount <= amt_hi:
+            hit = True
+        if hit:
+            out.append(r)
+    out.sort(key=lambda r: (r[1], r[7]), reverse=True)
+    return out[:limit]
+
+def parse_flex_date(s):
+    s = (s or "").strip()
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d"):
+        try: return datetime.datetime.strptime(s, fmt).date()
+        except Exception as _e: _log_silent("parse_flex_date#1", _e)
+    return None
+
+# ================= كنس الأرشيف: أي ملف مش بتاع النهارده يتنقل للأرشيف =================
+_SWEEP_CACHE = {}
+_SWEEP_LOCK = threading.Lock()
+
+_CACHE_LIMIT = 20000
+_CACHE_LOCK = threading.Lock()
+_CACHE_MISS = object()
+
+def _cache_get(cache, key):
+    """قراءة آمنة مع التعدد (Threads) من الكاش، ترجع _CACHE_MISS لو المفتاح غير موجود."""
+    with _CACHE_LOCK:
+        return cache.get(key, _CACHE_MISS)
+
+def _cache_put(cache, key, val):
+    """تخزين مؤقت بحد أقصى: لما يعدّي الحد بنشيل أقدم نصف الإدخالات (القاموس بيحفظ ترتيب الإضافة).
+    قبل كده الـ cache كان بيكبر مع كل ملف أُرشف طول عمر البرنامج."""
+    with _CACHE_LOCK:
+        cache[key] = val
+        if len(cache) > _CACHE_LIMIT:
+            for k in list(cache)[:_CACHE_LIMIT // 2]:
+                cache.pop(k, None)
+
+def _is_pdf_ready(path):
+    """يتحقق أن ملف الـ PDF اكتملت كتابته بالكامل (يبدأ بـ %PDF- وينتهي بـ %%EOF وقابل للقراءة) قبل الطباعة."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+            if not head.startswith(b"%PDF-"):
+                return False
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            if size <= 1000:
+                return False
+            fh.seek(max(0, size - 2048))
+            tail = fh.read(2048)
+            return b"%%EOF" in tail
+    except OSError:
+        return False
+
+def _unique_dest(dest):
+    """لو في ملف بنفس الاسم في الأرشيف (ويندوز بيرفض النقل) نضيف رقم بدل ما الملف يفضل برا."""
+    if not os.path.exists(dest): return dest
+    base, ext = os.path.splitext(dest)
+    n = 1
+    while os.path.exists(f"{base} ({n}){ext}"): n += 1
+    return f"{base} ({n}){ext}"
+
+def _sweep_file_date(path, fname, manual_map, mdate):
+    if fname.lower().endswith(".txt"):
+        rec = read_txt_record(path, mdate)
+        return rec["actual_date"] if rec else None      # txt مش إيصال → نسيبه
+    if MANUAL_NAME_RE.match(fname):
+        row = manual_map.get(fname)
+        if row:
+            dt_m = parse_vault_dt(row[4])
+            return dt_m.date() if dt_m else mdate
+        return mdate
+    raw = run_pdftotext(path)
+    if is_receipt_text(raw):
+        f = parse_receipt(path, raw)
+        return f["dt"].date() if f["dt"] else mdate
+    return extract_date_from_text(raw) or mdate
+
+def archive_sweep(folder_path, progress=None):
+    """ينقل كل ملف (PDF/TXT) تاريخه مش النهارده إلى الأرشيف، لأي سبب:
+    تاريخ مستقبلي غلط ← بنستخدم تاريخ الملف، خطأ قراءة ← تاريخ الملف، اسم مكرر ← بنزود رقم.
+    يرجّع (عدد المنقول، فولدرات الأيام اللي اتغيّرت)."""
+    ensure_archive_root(folder_path)
+    manual_map = load_manual_map()
+    load_void_map()
+    today = datetime.date.today()
+    cands = [f for f in glob.glob(os.path.join(folder_path, "*.pdf"))
+             if not f.endswith("_Summary.pdf") and not f.endswith("_cropped.pdf")]
+    cands += [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
+    total, moved, touched = len(cands), 0, set()
+
+    for idx, path in enumerate(cands, 1):
+        fname = os.path.basename(path)
+        if progress: progress(idx, total, fname)
+        try: stt = os.stat(path)
+        except OSError: continue
+        mdate = datetime.date.fromtimestamp(stt.st_mtime)
+        ck = (path, stt.st_mtime, stt.st_size)
+        file_date = _cache_get(_SWEEP_CACHE, ck)
+        if file_date is _CACHE_MISS:
+            try: file_date = _sweep_file_date(path, fname, manual_map, mdate)
+            except Exception as e:
+                log_exception(f"sweep_date:{fname}", e)
+                file_date = mdate
+            if file_date is None: continue
+            _cache_put(_SWEEP_CACHE, ck, file_date)
+        if file_date > today:                  # تاريخ مستقبلي = غالبًا قراءة غلط
+            file_date = mdate
+        if file_date >= today: continue        # بتاع النهارده يفضل مكانه
+
+        day_folder = archive_day_dir(folder_path, file_date)
+        try:
+            os.makedirs(day_folder, exist_ok=True)
+            shutil.move(path, _unique_dest(os.path.join(day_folder, fname)))
+            moved += 1
+            touched.add(day_folder)
+            if fname.lower().endswith(".pdf"):
+                cropped = path[:-4] + "_cropped.pdf"
+                if os.path.exists(cropped):
+                    try: os.remove(cropped)
+                    except Exception as _e: _log_silent("archive_sweep#1", _e)
+        except Exception as e:
+            log_exception(f"sweep_move:{fname}", e)   # هيتحاول تاني في الكنسة الجاية
+    return moved, touched
+
+def archive_day_records(day_folder):
+    """كل سجلات اليوم من الفولدر نفسه (عشان الملخص يبقى لليوم كله مش للملفات الجديدة بس)."""
+    manual_map = load_manual_map()
+    load_void_map()
+    recs = []
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.pdf"))):
+        b = os.path.basename(f)
+        if b.startswith("Samary_") or b.endswith("_cropped.pdf"): continue
+        try: rec = read_pdf_record(f, manual_map)
+        except Exception as e:
+            log_exception(f"day_records:{b}", e); rec = None
+        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": rec["is_manual"], "is_void": rec["is_void"]})
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.txt"))):
+        try: rec = read_txt_record(f, datetime.date.today())
+        except Exception as e:
+            log_exception(f"day_records_txt:{os.path.basename(f)}", e); rec = None
+        if rec: recs.append({"unit": rec["unit"], "amount": rec["amount"], "is_manual": True, "is_void": rec["is_void"]})
+    return recs
+
+def load_archive_day_records(day_folder, day):
+    """كل معاملات يوم من الأرشيف بكل التفاصيل (نفس شكل سجلات Records Viewer) ومعلّمة (مكرر/ملغي/ناقص...)."""
+    manual_map = load_manual_map()
+    load_void_map()
+    recs = []
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.pdf"))):
+        b = os.path.basename(f)
+        if b.startswith("Samary_") or b.endswith("_cropped.pdf") or b.endswith("_Summary.pdf"): continue
+        try: rec = read_pdf_record(f, manual_map)
+        except Exception as e:
+            log_exception(f"load_day_pdf:{b}", e); rec = None
+        if rec: recs.append(refresh_void_flag(rec))
+    for f in sorted(glob.glob(os.path.join(day_folder, "*.txt"))):
+        try: rec = read_txt_record(f, day)
+        except Exception as e:
+            log_exception(f"load_day_txt:{os.path.basename(f)}", e); rec = None
+        if rec: recs.append(refresh_void_flag(rec))
+    recs.sort(key=lambda x: x["dt_key"])
+    annotate_records(recs)
+    return recs
+
+# ================= إكسيل تفصيلي لكل يوم أرشيف (Details_DD-MM-YYYY.xlsx) =================
+def archive_day_excel_path(day_folder, d):
+    return os.path.join(day_folder, f"Details_{d.strftime('%d-%m-%Y')}.xlsx")
+
+def archive_write_day_excel(day_folder, d, recs=None):
+    """يعمل إكسيل بكل بيانات معاملات اليوم (نفس شكل Insurance_Report) جوه فولدر اليوم في الأرشيف.
+    بيكتب في ملف مؤقت وبعدين يستبدل القديم، فلو الإكسيل مفتوح بيسيبه ويرجّع None (يتعاد لاحقًا)."""
+    if not OPENPYXL_AVAILABLE: return None
+    out = archive_day_excel_path(day_folder, d)
+    tmp = os.path.join(day_folder, f"~tmp_Details_{d.strftime('%d-%m-%Y')}.xlsx")
+    try:
+        if recs is None: recs = load_archive_day_records(day_folder, d)
+        if not recs: return None
+        recs = sorted(recs, key=lambda r: r["dt_key"])
+        write_report(recs, tmp)
+        if not os.path.exists(tmp): return None
+        os.replace(tmp, out)
+        return out
+    except PermissionError:
+        _log_silent("archive_write_day_excel#locked", out)
+        return None
+    except Exception as e:
+        log_exception(f"archive_write_day_excel:{out}", e)
+        return None
+    finally:
+        try:
+            if os.path.exists(tmp): os.remove(tmp)
+        except Exception as _e: _log_silent("archive_write_day_excel#cleanup", _e)
+
+def archive_backfill_excels(folder_path, progress=None, force=False):
+    """يعمل إكسيل لكل الأيام المؤرشفة اللي معندهاش واحد (أو الكل لو force). بيرجّع عدد اللي اتعمل."""
+    root = os.path.join(folder_path, ARCHIVE_DIRNAME)
+    if not os.path.isdir(root): return 0
+    todo = []
+    for dp, _dn, fns in os.walk(root):
+        parts = os.path.relpath(dp, root).split(os.sep)
+        if len(parts) != 3: continue
+        try: d = datetime.date(int(parts[0]), int(parts[1].split("-")[0]), int(parts[2]))
+        except Exception: continue
+        if not any(f.lower().endswith((".pdf", ".txt")) and not f.startswith("Samary_") and not f.endswith("_cropped.pdf")
+                   for f in fns): continue
+        if not force and os.path.exists(archive_day_excel_path(dp, d)): continue
+        todo.append((dp, d))
+    made = 0
+    todo.sort(key=lambda x: x[1])
+    for i, (dp, d) in enumerate(todo, 1):
+        if progress: progress(i, len(todo))
+        if archive_write_day_excel(dp, d): made += 1
+    return made
+
+def archive_unread_by_day():
+    """{يوم: عدد الملفات اللي الفهرس معرفش يقراها كإيصال} (ممكن تكون إيصالات فشلت قراءتها أو ملفات تانية)."""
+    try:
+        conn = _ensure_archive_index()
+        try:
+            return {d: c for d, c in conn.execute(
+                "SELECT day, COUNT(*) FROM archive_index WHERE is_receipt = 0 GROUP BY day").fetchall()}
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("archive_unread_by_day", e)
+        return {}
+
+def archive_all_days():
+    try:
+        conn = _ensure_archive_index()
+        try:
+            return [r[0] for r in conn.execute("SELECT DISTINCT day FROM archive_index ORDER BY day").fetchall()]
+        finally:
+            conn.close()
+    except Exception as e:
+        log_exception("archive_all_days", e)
+        return []
+
+def archive_reindex(folder_path, days=None, progress=None):
+    """إعادة قراءة الإيصالات من الأول: بيمسح فهرس الأيام المحددة (days=None يعني كل الأيام) ويقرا الملفات تاني
+    بالقارئ الحالي. الفهرس العادي بيتخطى أي ملف تاريخه وحجمه ما اتغيرش، فالأيام اللي اتسجلت غلط (مبلغ صفر)
+    كانت بتفضل كده. بترجّع قاموس بالأعداد، أو None لو في فهرسة تانية شغالة ومخلصتش في 30 ثانية."""
+    if not _ARCHIVE_LOCK.acquire(timeout=30): return None
+    try:
+        with _CACHE_LOCK:
+            _PARSE_CACHE.clear()
+        conn = _ensure_archive_index()
+        try:
+            if days is None:
+                conn.execute("DELETE FROM archive_index")
+                if _has_fts5(conn):
+                    conn.execute("DELETE FROM archive_fts")
+            else:
+                if _has_fts5(conn):
+                    conn.executemany("DELETE FROM archive_fts WHERE path IN (SELECT path FROM archive_index WHERE day = ?)", [(d,) for d in days])
+                conn.executemany("DELETE FROM archive_index WHERE day = ?", [(d,) for d in days])
+            conn.commit()
+        finally:
+            conn.close()
+        n_read = archive_index_update(folder_path, progress)
+        try: _archive_search_rows()
+        except Exception as e: log_exception("archive_reindex_search_warm", e)
+
+        conn = _ensure_archive_index()
+        try:
+            where, args = "", []
+            if days is not None:
+                if not days: return {"read": n_read, "unread": 0, "unread_files": [], "zero_amount": 0}
+                where = " AND day IN (%s)" % ",".join("?" * len(days))
+                args = list(days)
+            unread_files = [r[0] for r in conn.execute(
+                "SELECT path FROM archive_index WHERE is_receipt = 0" + where + " LIMIT 50", args).fetchall()]
+            unread = conn.execute("SELECT COUNT(*) FROM archive_index WHERE is_receipt = 0" + where, args).fetchone()[0]
+            zero_amt = conn.execute(
+                "SELECT COUNT(*) FROM archive_index WHERE is_receipt = 1 AND is_void = 0 AND is_manual = 0 AND amount <= 0" + where,
+                args).fetchone()[0]
+        finally:
+            conn.close()
+        if unread_files:
+            log_exception("archive_reindex_unread", "files not read as receipts: " + " | ".join(unread_files[:20]))
+        return {"read": n_read, "unread": unread, "unread_files": unread_files, "zero_amount": zero_amt}
+    finally:
+        _ARCHIVE_LOCK.release()
+
+import hashlib as _hl, hmac as _hm
+import math as _math
+
+# باسورد المشرف: مخزّن كـ PBKDF2-SHA256 (200 ألف دورة) مع salt، مفيش نص صريح في الكود.
+# لتغييره: شغّل make_admin_hash.py والصق السطرين الناتجين مكان _SUP_SALT و _SUP_HASH.
+_SUP_SALT = bytes.fromhex("4d5883eb3e96982fb29d76b5ae8d46d7")
+_SUP_HASH = "8696da1f0380fb81ab0e79ce8ba22766d54115016d5b75846e42862b44394173"
+_SUP_ITER = 200_000
+_SUP_STATE = {"fails": 0, "locks": 0, "locked_until": 0.0}
+
+def _sup_hash(val):
+    return _hl.pbkdf2_hmac("sha256", val.encode("utf-8"), _SUP_SALT, _SUP_ITER).hex()
+
+def sup_lock_remaining():
+    return max(0, int(_SUP_STATE["locked_until"] - time.time() + 0.999))
+
+def is_supervisor_password(raw):
+    """مقارنة ثابتة الزمن. نفس التطبيع القديم (strip + lower) عشان السلوك ميتغيرش. مفيش عدّ فشل هنا."""
+    return _hm.compare_digest(_sup_hash((raw or "").strip().lower()), _SUP_HASH)
+
+def sup_register_fail():
+    """5 محاولات فاشلة متتالية = قفل 30 ثانية (يتضاعف لحد 10 دقايق). النجاح بيصفّر العدّاد."""
+    _SUP_STATE["fails"] += 1
+    try: logging.warning("Supervisor gate: failed attempt #%d", _SUP_STATE["fails"])
+    except Exception as _e: _log_silent("sup_register_fail#1", _e)
+    if _SUP_STATE["fails"] >= 5:
+        _SUP_STATE["fails"] = 0
+        _SUP_STATE["locks"] += 1
+        _SUP_STATE["locked_until"] = time.time() + min(600, 30 * (2 ** (_SUP_STATE["locks"] - 1)))
+
+def sup_register_success():
+    _SUP_STATE["fails"] = 0
+    _SUP_STATE["locks"] = 0
+EMPLOYEE_HASHES = {
+    "05c8bd5d4dcdb18b690e160fd7a5c5190ee9ce7eb565d88f8e7b1f81b5f25bf6",
+    "06ff8a72d6c750f6190e3be9beee93480751e63429b79a4a9a3409d537cf4710",
+    "158a323a7ba44870f23d96f1516dd70aa48e9a72db4ebb026b0a89e212a208ab",
+    "165940940a02a187e4463ff467090930038c5af8fc26107bf301e714f599a1da",
+    "1c6bf6cd5656b79a9cd667582d2b31a6bcdd071acd1f1fdc0bb653df031fe409",
+    "2759755265efab6b9a509e4c2662aead97747c0b5ad16694dd72fef521b5d1aa",
+    "38aaaa2726ae59363be8267ddf3c887e125abf3872a221c3048c931b73563e4e",
+    "5994471abb01112afcc18159f6cc74b4f511b99806da59b3caf5a9c173cacfc5",
+    "65ec295e41007d643b557a13a2d8fda976f887ab352ee51debba9417914e686e",
+    "67a375e4ddcdb509545a752ea82be28b546ded87431078fe6fc1ead202f5815c",
+    "922da9fd247cabfaa88ac472af4e4910cab8b5a5cd1f243ce15a9cd80b844384",
+    "9a54ca89652e118aef6d89047338e990240c40ec810f3f5dd00f191acd7feff2",
+    "9b59026d8817985b390666d0fe1695b63d9be2e7a60e3c07274193642eda3247",
+    "a4f1a218260b2efd0b86780410a4e0ec643bd33dcadc9ae2c6d8e2282ae01115",
+    "a7be8e1fe282a37cd666e0632b17d933fa13f21addf4798fc0455bc166e2488c",
+    "ad5055ce5b414306010f3e844346b669fbf99b47b5f9f3a4e589c86a216fdcaf",
+    "aeba47c17ca09557808c333b49af210a0209aff6b4334fa7192aaed69c5f36dd",
+    "aff4d166083896b1584b9b3ed2b89cce8c9abe10fe384342d1ed2e73114c819e",
+    "ec9b8e7a0da6fa1d24ebb7546db2f67ca2320b110c93ede3c5c5d3ef13ebe1ab",
+    "ed823ec32c5d4e9ca9dd968bb0fe9366b7d904ce0cae615308ddd5b89f0e6a3a",
+    "f1294f35f19846cd012506eadcc13ecda95eb7ddc6c661bc1b9402c4b00eb703",
+}
+
+COMPANY_WORDS_RE = re.compile(r"مجمع|التأمين|التامين|الإلزامي|الالزامي|^للمركبات$|^المركبات$")
+TIME_RE = re.compile(
+    r"(\d{2}:\d{2}\s+\d{2}[-/]\d{2}[-/]\d{4})|(\d{2}[-/]\d{2}[-/]\d{4}\s+\d{2}:\d{2})|"
+    r"(\d{4}[-/]\d{2}[-/]\d{2}\s+\d{2}:\d{2})")
+FLOAT_RE = re.compile(r"\b\d{1,3}(?:,\d{3})*\.\d{2}\b|\b\d+\.\d{2}\b")
+
+LABEL_PATTERNS = [
+    ("insured", r"اسم\s+المؤمن\s+له"),
+    ("company", r"اسم\s+المؤمن"),
+    ("plate", r"رقم\s+اللوح[ةه]"),
+    ("unit", r"وحدة\s+المرور"),
+    ("chassis", r"رقم\s+الشاسي[ةه]?"),
+    ("motor", r"رقم\s+الموتور"),
+    ("make", r"الماركة|الماركه"),
+    ("model", r"الطراز"),
+    ("period", r"المدة\s+الت[اأ]مينية"),
+    ("premium", r"[اأإ]جمالي\s+القسط"),
+    ("total", r"ال[اأإ]جمالي\s+العام"),
+    ("printed", r"تمت\s+الطباعة(?:\s+في)?"),
+]
+
+def split_label(line):
+    for key, pat in LABEL_PATTERNS:
+        m = re.search(pat + r"\s*[:：]?", line)
+        if m:
+            rest = line[:m.start()] + " " + line[m.end():]
+            rest = re.sub(r"\s+", " ", rest).strip(" :：\t")
+            return key, rest
+    return None, line.strip()
+
+def fix_plate(s):
+    s = re.sub(r"\s+", " ", (s or "")).strip()
+    if not s:
+        return "-"
+    digits = re.findall(r"\d+", s)
+    letters = re.findall(r"[\u0621-\u064A]+", s)
+    if digits and letters:
+        return f"{' '.join(letters)} - {''.join(digits)}"
+    return s.strip(" -") or "-"
+
+def is_receipt_text(txt):
+    return bool(re.search(r"رقم\s+اللوح[ةه]|سداد\s+قسط", txt or ""))
+
+NOISE_LINE_RE = re.compile(r"إيصال|ايصال|سداد|قسط|على\s+المركبات|^المركبات$|^للمركبات$|مجمع|التأمين|التامين|الإلزامي|الالزامي|وحدة\s+مرور|^وحدة\b|للاطلاع|رمز\s+الاستجابة")
+
+def _is_noise_line(line):
+    return bool(NOISE_LINE_RE.search(line or "")) or bool(detect_unit_from_text(line))
+
+def _looks_like_plate(s):
+    s = s or ""
+    return bool(re.search(r"\d", s)) and not _is_noise_line(s)
+
+def parse_receipt_text(txt):
+    lines = [l.strip() for l in txt.splitlines() if l.strip()]
+    items = [split_label(l) for l in lines]
+
+    def first_value(key):
+        for i, (k, v) in enumerate(items):
+            if k == key:
+                if v: return v, i
+                if key in ("unit", "company"):
+                    return "", i
+                for j in (i + 1, i - 1):
+                    if 0 <= j < len(items) and items[j][0] is None and items[j][1]:
+                        cand = items[j][1]
+                        if _is_noise_line(cand): continue
+                        if key == "plate" and not _looks_like_plate(cand): continue
+                        return cand, i
+                return "", i
+        return None, None
+
+    out = {}
+    plate_v, i_plate = first_value("plate")
+    out["plate"] = fix_plate(plate_v) if (plate_v and _looks_like_plate(plate_v)) else "-"
+
+    unit_v, i_unit = first_value("unit")
+    unit = detect_unit_from_text(unit_v) if unit_v else None
+    if not unit:
+        unit = detect_unit_from_text(txt)
+    out["unit"] = unit or UNSPEC
+
+    chassis_v, i_chassis = first_value("chassis")
+    chassis = re.sub(r"\s+", "", chassis_v) if chassis_v else ""
+    if not chassis:
+        m = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", txt)
+        chassis = m.group(0) if m else "-"
+    out["chassis"] = chassis
+
+    motor_v, i_motor = first_value("motor")
+    out["motor"] = re.sub(r"\s+", "", motor_v) if motor_v else "-"
+
+    make_v, _ = first_value("make")
+    out["make"] = make_v or "-"
+    model_v, i_model = first_value("model")
+    out["model"] = model_v or "-"
+
+    insured = "-"
+    if any(k == "insured" for k, _ in items):
+        start = i_unit if i_unit is not None else (i_plate if i_plate is not None else -1)
+        if i_chassis is not None: end = i_chassis
+        elif i_motor is not None: end = i_motor
+        else: end = len(items)
+        frags = []
+        for i in range(start + 1, end):
+            k, v = items[i]
+            if k in (None, "insured", "company") and v:
+                if COMPANY_WORDS_RE.search(v): continue
+                if v.startswith("وحدة") or detect_unit_from_text(v): continue
+                frags.append(v)
+        insured = " ".join(frags).strip(" :-") or "-"
+    out["insured"] = insured
+
+    i_prem = first_value("premium")[1]
+    region = lines
+    if i_model is not None and i_prem is not None and i_prem > i_model:
+        region = lines[i_model + 1:i_prem]
+    dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", "\n".join(region))
+    if len(dates) < 2:
+        dates = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", txt)
+    dates = sorted(dates[:2]) if len(dates) >= 2 else dates
+    out["period"] = f"{dates[0]} إلى {dates[1]}" if len(dates) >= 2 else "-"
+
+    amount = None
+    for key in ("total", "premium"):
+        v, _ = first_value(key)
+        if v:
+            f = FLOAT_RE.findall(v)
+            if f:
+                amount = float(f[-1].replace(",", ""))
+                break
+    if amount is None:
+        f = FLOAT_RE.findall(txt)
+        amount = float(f[-1].replace(",", "")) if f else 0.0
+    out["amount"] = amount
+
+    printed_v, _ = first_value("printed")
+    print_time = "-"
+    for cand in ([printed_v] if printed_v else []) + [txt]:
+        m = TIME_RE.search(cand)
+        if m:
+            print_time = m.group(0).strip().replace("/", "-")
+            break
+    dt = parse_print_time(print_time)
+    out["dt"] = dt
+    out["time"] = dt.strftime("%d-%m-%Y %H:%M") if dt else print_time
+    return out
+
+def run_pdftotext(path):
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        res = subprocess.run([PDFTOTEXT_EXE, "-layout", "-enc", "UTF-8", path, "-"],
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                             encoding='utf-8', errors='ignore', creationflags=flags, timeout=45)
+        return clean_arabic(res.stdout)
+    except Exception as e:
+        log_exception(f"pdftotext:{os.path.basename(path)}", e)
+        return ""
+
+_AR_LETTER_RE = re.compile(r"[\u0621-\u064A]")
+_AR_RUN_RE = re.compile(r"[\u0621-\u064A]+")
+_LIGA_REV = {"\uFEF5": "آل", "\uFEF6": "آل", "\uFEF7": "أل", "\uFEF8": "أل",
+             "\uFEF9": "إل", "\uFEFA": "إل", "\uFEFB": "ال", "\uFEFC": "ال"}
+_REV_HINTS = {"مقر", "مسا", "ةدحو", "رورملا", "نمؤملا", "ةحوللا", "هل"}
+_FWD_HINTS = {"رقم", "اسم", "وحدة", "المرور", "المؤمن", "اللوحة", "له"}
+
+BBOX_LABELS = [
+    ("insured", r"اسم\s*المؤمن\s*له"),
+    ("company", r"اسم\s*المؤمن"),
+    ("plate", r"رقم\s*اللوحه"),
+    ("unit", r"وحده\s*المرور"),
+    ("chassis", r"رقم\s*الشاسي"),
+    ("motor", r"رقم\s*الموتور"),
+    ("make", r"الماركه"),
+    ("model", r"الطراز"),
+    ("period", r"المده\s*التامينيه"),
+    ("premium", r"اجمالي\s*القسط"),
+    ("total", r"الاجمالي\s*العام"),
+    ("printed", r"تمت\s*الطباعه"),
+]
+
+def _fold_ar(t):
+    t = re.sub(r"[أإآٱ]", "ا", t)
+    t = t.replace("ى", "ي").replace("ة", "ه")
+    return re.sub(r"\s+", " ", t)
+
+_BBOX_LOGGED = False
+
+def run_pdftotext_bbox(path):
+    global _BBOX_LOGGED
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        res = subprocess.run([PDFTOTEXT_EXE, "-bbox", path, "-"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore",
+                             creationflags=flags, timeout=45)
+    except Exception as e:
+        log_exception(f"bbox:{os.path.basename(path)}", e)
+        return None, None, []
+    out = res.stdout or ""
+    pm = re.search(r'<page\s+width="([\d.]+)"\s+height="([\d.]+)"', out)
+    if not pm:
+        if not _BBOX_LOGGED:
+            _BBOX_LOGGED = True
+            log_exception("bbox_empty", f"rc={res.returncode} stdout[:300]={out[:300]!r} stderr[:300]={(res.stderr or '')[:300]!r}")
+        return None, None, []
+    page_end = out.find("</page>")
+    if page_end > 0:
+        out = out[:page_end]
+    words = []
+    for m in re.finditer(r'<word\s+xMin="([\d.\-]+)"\s+yMin="([\d.\-]+)"\s+xMax="([\d.\-]+)"\s+yMax="([\d.\-]+)">(.*?)</word>', out):
+        words.append((float(m.group(1)), float(m.group(2)), float(m.group(3)), float(m.group(4)), html.unescape(m.group(5))))
+    return float(pm.group(1)), float(pm.group(2)), words
+
+def _bbox_words(raw_words):
+    base = [clean_arabic(w[4]) for w in raw_words]
+    rev_hits = sum(1 for t in base if t in _REV_HINTS)
+    fwd_hits = sum(1 for t in base if t in _FWD_HINTS)
+    reversed_mode = rev_hits > fwd_hits
+    out = []
+    for (x0, y0, x1, y1, raw) in raw_words:
+        if reversed_mode:
+            for k, v in _LIGA_REV.items():
+                raw = raw.replace(k, v)
+        t = clean_arabic(raw)
+        if reversed_mode:
+            t = _AR_RUN_RE.sub(lambda m: m.group(0)[::-1], t)
+        t = t.strip()
+        if t:
+            out.append({"x0": x0, "x1": x1, "yc": (y0 + y1) / 2.0, "t": t})
+    return out
+
+def _join_value_words(ws):
+    lines = []
+    for w in sorted(ws, key=lambda w: w["yc"]):
+        if lines and abs(w["yc"] - lines[-1][0]) <= 3:
+            lines[-1][1].append(w)
+        else:
+            lines.append([w["yc"], [w]])
+    parts = []
+    for _, lw in lines:
+        has_ar = any(_AR_LETTER_RE.search(w["t"]) for w in lw)
+        lw.sort(key=(lambda w: -w["x1"]) if has_ar else (lambda w: w["x0"]))
+        parts.append(" ".join(w["t"] for w in lw))
+    return re.sub(r"\s+", " ", " ".join(parts)).strip(" :：")
+
+def _value_lines(ws):
+    lines = []
+    for w in sorted(ws, key=lambda w: w["yc"]):
+        if lines and abs(w["yc"] - lines[-1][0]) <= 3:
+            lines[-1][1].append(w)
+        else:
+            lines.append([w["yc"], [w]])
+    res = []
+    for _, lw in lines:
+        has_ar = any(_AR_LETTER_RE.search(w["t"]) for w in lw)
+        lw.sort(key=(lambda w: -w["x1"]) if has_ar else (lambda w: w["x0"]))
+        t = re.sub(r"\s+", " ", " ".join(w["t"] for w in lw)).strip(" :：")
+        if t:
+            res.append(t)
+    return res
+
+def parse_receipt_bbox(path, fallback_text=""):
+    page_w, page_h, raw_words = run_pdftotext_bbox(path)
+    if not page_w or not raw_words:
+        return None, [], {"error": "no bbox output"}
+    words = _bbox_words(raw_words)
+    split = page_w * 0.55
+
+    rows = []
+    for w in sorted([w for w in words if w["x0"] >= split], key=lambda w: w["yc"]):
+        if rows and abs(w["yc"] - rows[-1]["yc"]) <= 4:
+            rows[-1]["w"].append(w)
+            rows[-1]["yc"] = sum(x["yc"] for x in rows[-1]["w"]) / len(rows[-1]["w"])
+        else:
+            rows.append({"yc": w["yc"], "w": [w]})
+
+    labels = {}
+    for r in rows:
+        txt = _fold_ar(" ".join(x["t"] for x in sorted(r["w"], key=lambda w: -w["x1"]))).replace(":", " ")
+        txt = re.sub(r"\s+", " ", txt).strip()
+        for key, pat in BBOX_LABELS:
+            if re.search(pat, txt):
+                if key not in labels:
+                    labels[key] = r["yc"]
+                break
+
+    first_y = (min(labels.values()) - 8) if labels else page_h * 0.04
+    last_y = (labels["printed"] + 8) if "printed" in labels else page_h * 0.5
+    value_words = [w for w in words if w["x0"] < split and first_y <= w["yc"] <= last_y]
+    lines = _value_lines(value_words)
+    dbg = {"page": (page_w, page_h), "labels": labels, "lines": lines,
+           "words": [(round(w["x0"]), round(w["x1"]), round(w["yc"]), w["t"]) for w in sorted(words, key=lambda w: (w["yc"], -w["x1"]))]}
+
+    if len(labels) < 6 or ("plate" not in labels and "chassis" not in labels):
+        return None, lines, dbg
+
+    buckets = {k: [] for k in labels}
+    for w in value_words:
+        key, dist = min(((k, abs(y - w["yc"])) for k, y in labels.items()), key=lambda kv: kv[1])
+        if dist <= 14:
+            buckets[key].append(w)
+    vals = {k: _join_value_words(v) for k, v in buckets.items()}
+    dbg["vals"] = vals
+
+    out = {}
+    pv = vals.get("plate", "")
+    out["plate"] = fix_plate(pv) if pv.strip(" -") else "-"
+
+    unit = detect_unit_from_text(vals.get("unit", "")) or detect_unit_from_text(fallback_text)
+    out["unit"] = unit or UNSPEC
+
+    ch = re.sub(r"\s+", "", vals.get("chassis", ""))
+    if not ch:
+        m = re.search(r"\b[A-HJ-NPR-Z0-9]{17}\b", fallback_text or "")
+        ch = m.group(0) if m else "-"
+    out["chassis"] = ch
+    out["motor"] = re.sub(r"\s+", "", vals.get("motor", "")) or "-"
+    out["make"] = vals.get("make", "") or "-"
+    out["model"] = vals.get("model", "") or "-"
+    out["insured"] = vals.get("insured", "").strip(" :-") or "-"
+
+    dates = sorted(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", vals.get("period", "")))[:2]
+    out["period"] = f"{dates[0]} إلى {dates[1]}" if len(dates) == 2 else "-"
+
+    amount = None
+    for key in ("total", "premium"):
+        f = FLOAT_RE.findall(vals.get(key, ""))
+        if f:
+            amount = float(f[-1].replace(",", ""))
+            break
+    if amount is None:
+        f = FLOAT_RE.findall(fallback_text or "")
+        amount = float(f[-1].replace(",", "")) if f else 0.0
+    out["amount"] = amount
+
+    print_time = "-"
+    for cand in (vals.get("printed", ""), fallback_text or ""):
+        m = TIME_RE.search(cand)
+        if m:
+            print_time = m.group(0).strip().replace("/", "-")
+            break
+    dt = parse_print_time(print_time)
+    out["dt"] = dt
+    out["time"] = dt.strftime("%d-%m-%Y %H:%M") if dt else print_time
+    return out, lines, dbg
+
+_PLATE_ONLY_RE = re.compile(r"^(?:[\u0621-\u064A]{1,4}\d{1,4}|\d{1,4}[\u0621-\u064A]{1,4})$")
+
+def parse_receipt_by_type(lines, fallback_text=""):
+    unit = None
+    dates, amounts, tm, rest = [], [], None, []
+    for raw in lines:
+        l = re.sub(r"\s+", " ", raw or "").strip(" :：")
+        if not l or l == "-":
+            continue
+        m = TIME_RE.search(l)
+        if m and not _AR_LETTER_RE.search(l):
+            tm = m.group(0).strip().replace("/", "-")
+            continue
+        ds = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", l)
+        if ds and re.fullmatch(r"[\d\s\-]+", l):
+            dates += ds
+            continue
+        if FLOAT_RE.fullmatch(l):
+            amounts.append(float(l.replace(",", "")))
+            continue
+        if re.match(r"^(?:وحدة|منفذ|ميناء|مجمع\s+خدمات)", l):
+            u = detect_unit_from_text(l)
+            if u:
+                unit = unit or u
+                continue
+        if NOISE_LINE_RE.search(l) or COMPANY_WORDS_RE.search(l):
+            continue
+        rest.append(l)
+
+    cidx = None
+    for i, l in enumerate(rest):
+        c = l.replace(" ", "")
+        if not _AR_LETTER_RE.search(c) and len(c) >= 10 and re.search(r"[A-Za-z]", c) and re.search(r"\d", c):
+            cidx = i
+            if re.fullmatch(r"[A-HJ-NPR-Z0-9]{17}", c):
+                break
+    if cidx is None:
+        for i, l in enumerate(rest):
+            if not _AR_LETTER_RE.search(l):
+                cidx = i
+                break
+    if cidx is None:
+        cidx = len(rest)
+    head, tail = rest[:cidx], rest[cidx:]
+
+    plate = "-"
+    others = []
+    for l in head:
+        if plate == "-" and _PLATE_ONLY_RE.match(re.sub(r"[\s\-]", "", l)):
+            plate = fix_plate(l)
+        else:
+            others.append(l)
+
+    out = {"plate": plate}
+    out["insured"] = " ".join(others).strip(" :-") or "-"
+    out["chassis"] = re.sub(r"\s+", "", tail[0]) if len(tail) > 0 else "-"
+    out["motor"] = re.sub(r"\s+", "", tail[1]) if len(tail) > 1 else "-"
+    out["make"] = tail[2] if len(tail) > 2 else "-"
+    out["model"] = " ".join(tail[3:]) if len(tail) > 3 else "-"
+    out["unit"] = unit or detect_unit_from_text(fallback_text) or UNSPEC
+    ds = sorted(dates)[:2]
+    out["period"] = f"{ds[0]} إلى {ds[1]}" if len(ds) == 2 else "-"
+    if amounts:
+        out["amount"] = amounts[-1]
+    else:
+        f = FLOAT_RE.findall(fallback_text or "")
+        out["amount"] = float(f[-1].replace(",", "")) if f else 0.0
+    if not tm:
+        m = TIME_RE.search(fallback_text or "")
+        tm = m.group(0).strip().replace("/", "-") if m else "-"
+    dt = parse_print_time(tm)
+    out["dt"] = dt
+    out["time"] = dt.strftime("%d-%m-%Y %H:%M") if dt else tm
+    return out
+
+def _text_value_lines(txt):
+    res = []
+    for line in (txt or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        k, v = split_label(line)
+        if v:
+            res.append(v)
+    return res
+
+def _receipt_ok(f):
+    if not f:
+        return False
+    ch, mo, ins, mk = f["chassis"], f["motor"], f["insured"], f["make"]
+    if _AR_LETTER_RE.search(ch) or _AR_LETTER_RE.search(mo):
+        return False
+    if ch != "-" and (len(ch) < 5 or not re.search(r"\d", ch)):
+        return False
+    if ch != "-" and ch == mo:
+        return False
+    if mk != "-" and mk == mo:
+        return False
+    if ins == "-":
+        return False
+    if re.fullmatch(r"[A-Za-z0-9]{8,}", ins.replace(" ", "")):
+        return False
+    return True
+
+_PDFTOTEXT_VER = None
+_DEBUG_COUNT = 0
+
+def _dump_parse_debug(path, method, txt, dbg):
+    global _DEBUG_COUNT, _PDFTOTEXT_VER
+    if _DEBUG_COUNT >= 12:
+        return
+    _DEBUG_COUNT += 1
+    try:
+        if _PDFTOTEXT_VER is None:
+            flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            r = subprocess.run([PDFTOTEXT_EXE, "-v"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                               text=True, encoding="utf-8", errors="ignore", creationflags=flags)
+            _PDFTOTEXT_VER = ((r.stderr or "") + (r.stdout or "")).strip().replace("\n", " | ")
+        fn = os.path.join(DOCUMENTS_DIR, "parse_debug.txt")
+        with open(fn, "a", encoding="utf-8") as fh:
+            fh.write("=" * 70 + "\n")
+            fh.write(f"{datetime.datetime.now():%d-%m-%Y %H:%M:%S} | {os.path.basename(path)} | method={method}\n")
+            fh.write(f"pdftotext: {_PDFTOTEXT_VER}\n")
+            fh.write(f"page={dbg.get('page')} labels={dbg.get('labels')}\n")
+            fh.write(f"vals={dbg.get('vals')}\n")
+            fh.write(f"value_lines={dbg.get('lines')}\n")
+            fh.write("--- bbox words (x0, x1, y, text) ---\n")
+            for w in dbg.get("words", []):
+                fh.write(f"{w}\n")
+            fh.write("--- layout text ---\n")
+            fh.write((txt or "") + "\n")
+    except Exception as e:
+        log_exception("dump_parse_debug", e)
+
+# ===== قراءة إضافية لأشكال إيصالات بتفشل فيها القراءة الاحتياطية (بتشتغل بس لو القراءة العادية ما نجحتش) =====
+_INLINE_LABELS = [
+    ("plate", r"رقم\s*(?:المركب[ةه]|اللوح[ةه])"),
+    ("unit", r"وحد[ةه]\s*المرور"),
+    ("insured", r"اسم\s*(?:المواطن|المؤمن\s*له)"),
+    ("chassis", r"رقم\s*الشاسي[ةه]?"),
+    ("motor", r"رقم\s*الموتور"),
+    ("make", r"الماركه|الماركة"),
+    ("model", r"الطراز"),
+    ("amount", r"(?:ال)?مبلغ"),
+    ("printed", r"تمت\s*الطباعة(?:\s*في)?"),
+]
+_VAR_NOISE_RE = re.compile(r"الاستجابة|أعلاه|اعلاه|الشروط|للوثيقة|يرجى|مسح")
+
+def _var_finish(out, txt, tm):
+    out["unit"] = out.get("unit") or detect_unit_from_text(txt) or UNSPEC
+    if not tm:
+        m = TIME_RE.search(txt or "")
+        tm = m.group(0).strip().replace("/", "-") if m else "-"
+    dt = parse_print_time(tm)
+    out["dt"] = dt
+    out["time"] = dt.strftime("%d-%m-%Y %H:%M") if dt else tm
+    return out
+
+def _parse_inline_labeled(txt):
+    """الشكل القديم: كل سطر 'العنوان: القيمة' (رقم المركبة / اسم المواطن / المبلغ ...)."""
+    vals, last = {}, None
+    for raw in (txt or "").splitlines():
+        line = re.sub(r"\s+", " ", raw).strip()
+        if not line:
+            last = None
+            continue
+        hit = None
+        for key, pat in _INLINE_LABELS:
+            m = re.match(r"^" + pat + r"\s*[:：]\s*(.*)$", line)
+            if m:
+                hit = (key, m.group(1).strip())
+                break
+        if hit:
+            key, v = hit
+            vals.setdefault(key, v)
+            last = "insured" if key == "insured" else None
+        elif last == "insured" and ":" not in line and ("تمت" not in line) and not _VAR_NOISE_RE.search(line):
+            vals["insured"] = (vals["insured"] + " " + line).strip()
+        else:
+            last = None
+    if len(vals) < 4 or "chassis" not in vals:
+        return None
+    out = {}
+    pv = vals.get("plate", "")
+    out["plate"] = fix_plate(pv) if pv.strip(" -") else "-"
+    out["unit"] = detect_unit_from_text(vals.get("unit", ""))
+    out["insured"] = vals.get("insured", "").strip(" :-") or "-"
+    out["chassis"] = re.sub(r"\s+", "", vals.get("chassis", "")) or "-"
+    out["motor"] = re.sub(r"\s+", "", vals.get("motor", "")) or "-"
+    out["make"] = vals.get("make", "").strip(" .") or "-"
+    out["model"] = vals.get("model", "").strip(" .") or "-"
+    out["period"] = "-"
+    am = re.search(r"\d[\d,]*(?:\.\d+)?", vals.get("amount", ""))
+    out["amount"] = float(am.group(0).replace(",", "")) if am else 0.0
+    tm = None
+    m = TIME_RE.search(vals.get("printed", "") or "")
+    if m: tm = m.group(0).strip().replace("/", "-")
+    return _var_finish(out, txt, tm)
+
+def _parse_positional_text(txt):
+    """الشكل الجديد لما تنسيق النص بيتلخبط (قيم مش قصاد عناوينها): نفس فكرة parse_receipt_by_type
+    + مبلغ بـ 'جم' + مدة 'من .. إلى ..' + أول شاسيه بدل آخر واحد."""
+    unit, dates, amounts, tm, rest = None, [], [], None, []
+    for raw in _text_value_lines(txt):
+        l = re.sub(r"\s+", " ", raw or "").strip(" :：")
+        if not l or l == "-" or _VAR_NOISE_RE.search(l):
+            continue
+        m = TIME_RE.search(l)
+        if m and not _AR_LETTER_RE.search(l):
+            tm = m.group(0).strip().replace("/", "-")
+            continue
+        md = re.fullmatch(r"(?:من|إلى|الى)\s+(\d{2})-(\d{2})-(\d{4})", l)
+        if md:
+            dates.append(f"{md.group(3)}-{md.group(2)}-{md.group(1)}")
+            continue
+        ds = re.findall(r"\b\d{4}-\d{2}-\d{2}\b", l)
+        if ds and re.fullmatch(r"[\d\s\-]+", l):
+            dates += ds
+            continue
+        ma = re.fullmatch(r"(\d[\d,]*(?:\.\d+)?)\s*(?:جم|جنيه|EGP)?", l)
+        if ma and (FLOAT_RE.fullmatch(ma.group(1)) or re.search(r"[^\d.,]", l)):
+            amounts.append(float(ma.group(1).replace(",", "")))
+            continue
+        if re.match(r"^(?:وحدة|منفذ|ميناء|مجمع\s+خدمات)", l):
+            u = detect_unit_from_text(l)
+            if u:
+                unit = unit or u
+                continue
+        if NOISE_LINE_RE.search(l) or COMPANY_WORDS_RE.search(l):
+            continue
+        rest.append(l)
+    cidx = None
+    for i, l in enumerate(rest):
+        c = l.replace(" ", "")
+        if not _AR_LETTER_RE.search(c) and len(c) >= 10 and re.search(r"[A-Za-z]", c) and re.search(r"\d", c):
+            cidx = i
+            break
+    if cidx is None:
+        for i, l in enumerate(rest):
+            if not _AR_LETTER_RE.search(l):
+                cidx = i
+                break
+    if cidx is None:
+        return None
+    head, tail = rest[:cidx], rest[cidx:]
+    plate, others = "-", []
+    for l in head:
+        if plate == "-" and _PLATE_ONLY_RE.match(re.sub(r"[\s\-]", "", l)):
+            plate = fix_plate(l)
+        else:
+            others.append(l)
+    out = {"plate": plate}
+    out["insured"] = " ".join(others).strip(" :-") or "-"
+    out["chassis"] = re.sub(r"\s+", "", tail[0]) if len(tail) > 0 else "-"
+    out["motor"] = re.sub(r"\s+", "", tail[1]) if len(tail) > 1 else "-"
+    out["make"] = tail[2].strip(" .") if len(tail) > 2 else "-"
+    out["model"] = " ".join(tail[3:]).strip(" .") if len(tail) > 3 else "-"
+    out["unit"] = unit
+    ds = sorted(dates)[:2]
+    out["period"] = f"{ds[0]} إلى {ds[1]}" if len(ds) == 2 else "-"
+    out["amount"] = amounts[-1] if amounts else 0.0
+    return _var_finish(out, txt, tm)
+
+def _receipt_score(f):
+    """كام حقل طالع منطقي. بنستبدل نتيجة القراءة الاحتياطية بس لو القراءة الإضافية أحسن منها فعلًا."""
+    if not f: return -1
+    s = 0
+    if f.get("plate", "-") != "-": s += 1
+    ins = f.get("insured", "-")
+    if ins != "-" and not re.search(r"اسم\s*المواطن|رقم\s*المركب|المبلغ|[A-Za-z0-9]{6,}", ins): s += 1
+    if float(f.get("amount") or 0) > 0: s += 2
+    ch, mo = f.get("chassis", "-"), f.get("motor", "-")
+    if ch != "-" and len(ch) >= 5 and not _AR_LETTER_RE.search(ch) and re.search(r"\d", ch): s += 1
+    if mo != "-" and not _AR_LETTER_RE.search(mo): s += 1
+    mk = f.get("make", "-")
+    if mk != "-" and mk != mo: s += 1
+    md = f.get("model", "-")
+    if md != "-" and not re.search(r"المبلغ|جم|من\s+\d|إلى|الاستجابة", md): s += 1
+    if f.get("period", "-") != "-": s += 1
+    if f.get("dt"): s += 1
+    return s
+
+def parse_receipt_variants(txt):
+    txt = txt or ""
+    cands = []
+    if re.search(r"اسم\s*المواطن|رقم\s*المركب", txt):
+        cands.append(_parse_inline_labeled)
+    cands.append(_parse_positional_text)
+    best = None
+    for fn in cands:
+        try: r = fn(txt)
+        except Exception as e:
+            log_exception(f"parse_variant:{fn.__name__}", e)
+            r = None
+        if r and (best is None or _receipt_score(r) > _receipt_score(best)):
+            best = r
+    return best
+
+
+def _text_parse_complete(f):
+    return (
+        _receipt_ok(f)
+        and f.get("plate", "-") != "-"
+        and f.get("unit", UNSPEC) != UNSPEC
+        and float(f.get("amount") or 0) > 0
+        and f.get("dt") is not None
+        and f.get("chassis", "-") != "-"
+    )
+
+def parse_receipt(path, txt):
+    old = parse_receipt_text(txt)
+    if _text_parse_complete(old):
+        return old
+    bb, bb_lines, dbg = None, [], {}
+    try:
+        bb, bb_lines, dbg = parse_receipt_bbox(path, txt)
+    except Exception as e:
+        log_exception(f"parse_bbox:{os.path.basename(path)}", e)
+
+    chosen, method = None, None
+    for name, f in (("bbox", bb), ("text", old)):
+        if f and _receipt_ok(f):
+            chosen, method = f, name
+            break
+    if chosen is None:
+        for name, lines in (("type-bbox", bb_lines), ("type-text", _text_value_lines(txt))):
+            if lines:
+                try:
+                    f = parse_receipt_by_type(lines, txt)
+                except Exception as e:
+                    log_exception(f"parse_type:{os.path.basename(path)}", e)
+                    continue
+                if _receipt_ok(f):
+                    chosen, method = f, name
+                    break
+    if chosen is None:
+        chosen, method = (bb, "bbox-unverified") if bb else (old, "text-unverified")
+
+    if method not in ("bbox", "text"):
+        try:
+            var = parse_receipt_variants(txt)
+            if var and _receipt_score(var) > _receipt_score(chosen):
+                chosen, method = var, "variant"
+        except Exception as e:
+            log_exception(f"parse_variants:{os.path.basename(path)}", e)
+
+    if method not in ("bbox", "variant"):
+        _dump_parse_debug(path, method, txt, dbg or {})
+
+    norm = lambda p: sorted(re.sub(r"[\s\-]", "", p or ""))
+    if chosen is not old and chosen["plate"] != "-" and old["plate"] != "-" and norm(chosen["plate"]) == norm(old["plate"]):
+        chosen["plate"] = old["plate"]
+    return chosen
+
+def parse_vault_dt(created_at):
+    try:
+        return datetime.datetime.strptime(created_at.strip(), "%d-%m-%Y %H%M%S")
+    except Exception:
+        return None
+
+def load_manual_map():
+    mp = {}
+    try:
+        conn = db_connect()
+        c = conn.cursor()
+        c.execute("SELECT unit, plate, insured, amount, created_at, file_name FROM manual_tx ORDER BY id")
+        for u, p, n, a, ca, fn in c.fetchall():
+            mp[fn] = (u, p, n, a, ca)
+            mp["_" + fn] = (u, p, n, a, ca)
+        conn.close()
+    except Exception as e:
+        log_exception("load_manual_map", e)
+    return mp
+
+_PARSE_CACHE = {}
+
+def make_record(path, unit, plate, insured, amount, dt, mdate, is_manual, **extra):
+    bname = os.path.basename(path)
+    is_void = bname.startswith("_") or bname.lstrip("_") in _VOID_KEYS
+    rec = {
+        "unit": unit, "plate": plate, "insured": insured, "amount": float(amount),
+        "time": dt.strftime("%d-%m-%Y %H:%M") if dt else "-",
+        "chassis": "-", "motor": "-", "make": "-", "model": "-", "period": "-",
+        "file": bname, "path": path, "is_manual": is_manual,
+        "is_void": is_void,
+        "legacy_void": bname.startswith("_"),
+        "void_reason": _VOID_KEYS.get(bname.lstrip("_"), {}).get("reason", ""),
+        "actual_date": dt.date() if dt else mdate,
+        "dt_key": dt if dt else datetime.datetime.combine(mdate, datetime.time.min),
+    }
+    rec.update(extra)
+    return rec
+
+def read_pdf_record(path, manual_map):
+    b = os.path.basename(path)
+    if b.endswith("_cropped.pdf"):
+        return None
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    mdate = datetime.date.fromtimestamp(st.st_mtime)
+
+    if MANUAL_NAME_RE.match(b):
+        row = manual_map.get(b)
+        clean_b = b.lstrip("_")
+        m_amt = re.match(r"^(\d+(?:\.\d{2})?)", clean_b)
+        if row:
+            u, p, n, a, ca = row
+            unit = detect_unit_from_text(u) or UNSPEC
+            dt = parse_vault_dt(ca) or datetime.datetime.fromtimestamp(st.st_mtime)
+            return make_record(path, unit, p or "-", n or "-", a, dt, mdate, True)
+        key = (path, st.st_mtime, st.st_size, "manual")
+        cached_m = _cache_get(_PARSE_CACHE, key)
+        if cached_m is not _CACHE_MISS:
+            return dict(cached_m)
+        txt = run_pdftotext(path)
+        unit = detect_unit_from_text(txt) or UNSPEC
+        tm = TIME_RE.search(txt)
+        dt = parse_print_time(tm.group(0).strip().replace("/", "-")) if tm else None
+        amt = float(m_amt.group(1)) if m_amt else 0.0
+        rec = make_record(path, unit, "-", "-", amt, dt, mdate, True)
+        _cache_put(_PARSE_CACHE, key, dict(rec))
+        return rec
+
+    key = (path, st.st_mtime, st.st_size)
+    cached = _cache_get(_PARSE_CACHE, key)
+    if cached is not _CACHE_MISS:
+        return dict(cached) if cached else None
+    txt = run_pdftotext(path)
+    if not is_receipt_text(txt):
+        _cache_put(_PARSE_CACHE, key, None)
+        return None
+    f = parse_receipt(path, txt)
+    rec = make_record(path, f["unit"], f["plate"], f["insured"], f["amount"], f["dt"], mdate, False,
+                      chassis=f["chassis"], motor=f["motor"], make=f["make"],
+                      model=f["model"], period=f["period"])
+    if not f["dt"]:
+        rec["time"] = f["time"]
+    _cache_put(_PARSE_CACHE, key, dict(rec))
+    return rec
+
+def read_txt_record(tfile, target_date):
+    fname = os.path.basename(tfile)
+    clean_fn = fname.lstrip("_")
+    m_amt = re.search(r"^(\d+(?:\.\d{2})?)", clean_fn)
+    if not m_amt:
+        return None
+    amt = float(m_amt.group(1))
+    t_content = ""
+    try:
+        with open(tfile, "r", encoding="utf-8", errors="ignore") as tf:
+            t_content = clean_arabic(tf.read()).strip()
+    except Exception as e:
+        log_exception(f"read_txt:{fname}", e)
+    txt_date = extract_date_from_text(t_content)
+    if not txt_date:
+        try:
+            earliest = min(os.path.getmtime(tfile), os.path.getctime(tfile))
+            txt_date = datetime.datetime.fromtimestamp(earliest).date()
+        except Exception:
+            txt_date = target_date
+    unit = detect_unit_from_text(t_content) or UNSPEC
+    plate, insured = "-", "-"
+    for line in [l.strip() for l in t_content.splitlines() if l.strip()]:
+        if "لوحة" in line or "لوحه" in line:
+            cv = re.sub(r"^(?:رقم\s+)?(?:ال)?لوح[ةه][:\-\s]*", "", line).strip()
+            if cv: plate = cv
+        elif "مؤمن" in line or "اسم" in line:
+            cv = re.sub(r"^(?:اسم\s+)?(?:ال)?مؤمن(?:\s+له)?[:\-\s]*", "", line).strip()
+            if cv: insured = cv
+    rec = make_record(tfile, unit, plate, insured, amt, None, txt_date, True)
+    rec["time"] = txt_date.strftime("%d-%m-%Y")
+    return rec
+
+def clean_download_filename(filename):
+    base, ext = os.path.splitext(filename)
+    clean_base = re.sub(r"\s*\(\d+\)$", "", base)
+    return clean_base + ext
+
+def collect_records(folder_path, target_date, progress=None):
+    load_void_map()
+    pdf_files = []
+    margin = target_date - datetime.timedelta(days=1)
+    for f in glob.glob(os.path.join(folder_path, "*.pdf")):
+        if f.endswith("_Summary.pdf") or f.endswith("_cropped.pdf"):
+            continue
+        try:
+            if datetime.date.fromtimestamp(os.path.getmtime(f)) < margin:
+                continue
+        except OSError:
+            continue
+        pdf_files.append(f)
+
+    arch_day = archive_day_dir(folder_path, target_date)
+    if os.path.isdir(arch_day):
+        for f in glob.glob(os.path.join(arch_day, "*.pdf")):
+            if not os.path.basename(f).startswith("Samary_") and not f.endswith("_cropped.pdf"):
+                pdf_files.append(f)
+
+    txt_files = [f for f in glob.glob(os.path.join(folder_path, "*.txt")) if os.path.basename(f) != "Copy_Slip.txt"]
+    if os.path.isdir(arch_day):
+        txt_files += [f for f in glob.glob(os.path.join(arch_day, "*.txt"))]
+    total = len(pdf_files) + len(txt_files)
+    manual_map = load_manual_map()
+    records = []
+    done = 0
+
+    if len(pdf_files) > 3:
+        workers = min(4, max(2, os.cpu_count() or 2))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            fut_map = {ex.submit(read_pdf_record, pdf, manual_map): pdf for pdf in pdf_files}
+            for fut in as_completed(fut_map):
+                pdf = fut_map[fut]
+                done += 1
+                if progress: progress(done, total, os.path.basename(pdf))
+                try:
+                    rec = fut.result()
+                except Exception as e:
+                    log_exception(f"collect_pdf:{os.path.basename(pdf)}", e)
+                    rec = None
+                if rec and rec["actual_date"] == target_date:
+                    records.append(refresh_void_flag(rec))
+    else:
+        for pdf in pdf_files:
+            done += 1
+            if progress: progress(done, total, os.path.basename(pdf))
+            rec = read_pdf_record(pdf, manual_map)
+            if rec and rec["actual_date"] == target_date:
+                records.append(refresh_void_flag(rec))
+
+    for tfile in txt_files:
+        done += 1
+        if progress: progress(done, total, os.path.basename(tfile))
+        rec = read_txt_record(tfile, target_date)
+        if rec and rec["actual_date"] == target_date:
+            records.append(refresh_void_flag(rec))
+
+    records.sort(key=lambda x: x["dt_key"])
+    return records
+
+def annotate_records(records):
+    for r in records:
+        r["_key"] = (r["unit"], r["plate"], r["insured"], round(r["amount"], 2), r["time"],
+                     r["chassis"], r["motor"], r["make"], r["model"], r["period"])
+
+    active = [r for r in records if not r.get("is_void")]
+    key_counts = Counter(r["_key"] for r in active)
+    unit_counter = Counter(r["unit"] for r in active if r["unit"] != UNSPEC)
+    device_unit = unit_counter.most_common(1)[0][0] if unit_counter else None
+
+    dup_sig_seen = set()
+    browser_dup = {}
+    for r in sorted(active, key=lambda x: x["dt_key"]):
+        ident = dup_ident(r)
+        tx_sig = (ident, r["time"], round(r["amount"], 2))
+        if ident is not None and tx_sig in dup_sig_seen:
+            browser_dup[id(r)] = True
+        else:
+            browser_dup[id(r)] = False
+            if ident is not None:
+                dup_sig_seen.add(tx_sig)
+
+    for r in records:
+        if r.get("is_void"):
+            reason = r.get("void_reason") or ""
+            r["dup_n"], r["is_duplicate"], r["wrong_unit"] = 1, False, False
+            r["missing"], r["is_browser_dup"] = [], False
+            r["kind"] = "void"
+            r["status_text"] = tr("status_void") + (f" ({reason})" if reason else "")
+            continue
+
+        n = key_counts[r["_key"]]
+        if browser_dup.get(id(r), False) and n < 2:
+            n = 2   # نفس المعاملة بملف تاني (اسم مختلف): مش داخلة في الإجمالي، فتظهر "مكرر"
+        r["dup_n"] = n
+        r["is_duplicate"] = n > 1
+        r["wrong_unit"] = bool(device_unit and r["unit"] not in (UNSPEC, device_unit))
+        missing = []
+        if r["amount"] <= 0:
+            missing.append("0 amt")
+        if not r["is_manual"]:
+            if r["plate"] == "-": missing.append("plate")
+            if r["unit"] == UNSPEC: missing.append("unit")
+        r["missing"] = missing
+        r["is_browser_dup"] = browser_dup.get(id(r), False)
+
+        if r["is_duplicate"]:
+            r["kind"], r["status_text"] = "dup", tr("status_dup", n=n)
+        elif r["wrong_unit"]:
+            r["kind"], r["status_text"] = "wrong", tr("status_wrong")
+        elif missing:
+            r["kind"], r["status_text"] = "missing", tr("status_missing") + "، ".join(missing)
+        elif r["is_manual"]:
+            r["kind"], r["status_text"] = "manual", tr("status_manual")
+        else:
+            r["kind"], r["status_text"] = "ok", tr("status_ok")
+
+    return device_unit
+
+def dup_ident(r):
+    """هوية المركبة لكشف التكرار: اللوحة، ولو فاضية فالشاسيه (ثابت للمركبة). None = مفيش هوية فمش بنقارن."""
+    if r["plate"] != "-":
+        return ("plate", r["plate"])
+    ch = (r.get("chassis") or "-").strip()
+    return ("chassis", ch) if ch not in ("-", "") else None
+
+def counted_ids(records):
+    """المعاملات اللي بتدخل في الإجمالي: كل إيصال نزل في Downloads (مبلغه بيتضاف)، ما عدا اللي اتلغى يدويًا.
+    التكرار (نفس اللوحة/الشاسيه + الوقت + المبلغ) مجرد علامة وتلوين في Records Viewer ومبيتشالش من الإجمالي؛
+    لو المستخدم شاف تكرار فعلًا بيلغي واحدة يدويًا. نفس الدالة بتحدد الإجمالي في الشاشة والإكسيل وبون الملخص."""
+    return {id(r) for r in records if not r.get("is_void")}
+
+def counted_totals(records):
+    """(مجموع المبالغ، عدد المعاملات) المحسوبة فعلًا في الإجمالي."""
+    ids = counted_ids(records)
+    return round(sum(r["amount"] for r in records if id(r) in ids), 2), len(ids)
+
+def build_summary(records, device_unit, date_label):
+    units_summary = {}
+    valid_total_sum = 0.0
+    valid_count = 0
+    void_count = 0
+    void_sum = 0.0
+    counted = counted_ids(records)
+
+    for r in records:
+        if r.get("is_void"):
+            void_count += 1
+            void_sum += r["amount"]
+            continue
+
+        u = units_summary.setdefault(r["unit"], {"count": 0, "total": 0.0, "pdf_cnt": 0, "manual_cnt": 0})
+        u["count"] += 1
+        u["total"] += r["amount"]
+        u["manual_cnt" if r["is_manual"] else "pdf_cnt"] += 1
+
+        if id(r) in counted:
+            valid_total_sum += r["amount"]
+            valid_count += 1
+
+    info = {
+        "date_label": date_label,
+        "unit": device_unit or UNSPEC,
+        "total_count": valid_count,
+        "raw_count": len(records),
+        "total_sum": round(valid_total_sum, 2),
+        "void_count": void_count,
+        "void_sum": round(void_sum, 2),
+        "pdf_count": sum(1 for r in records if not r["is_manual"] and not r.get("is_void")),
+        "manual_count": sum(1 for r in records if r["is_manual"] and not r.get("is_void")),
+        "duplicates": sum(1 for r in records if r["is_duplicate"] and not r.get("is_void")),
+        "wrong_count": sum(1 for r in records if r["wrong_unit"] and not r.get("is_void")),
+        "missing_count": sum(1 for r in records if r["missing"] and not r.get("is_void")),
+    }
+    return info, units_summary
+
+def write_report(records, out_file):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Detailed Report"
+    ws.views.sheetView[0].rightToLeft = True
+
+    font_header = Font(name="Arial", size=12, bold=True, color="FFFFFF")
+    font_regular = Font(name="Arial", size=11, bold=True, color="000000")
+    fill_header = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
+    fill_total = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+    KIND_STYLE = {
+        "dup": (PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"), "9C0006"),
+        "wrong": (PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid"), "833C0B"),
+        "missing": (PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid"), "7F6000"),
+        "manual": (PatternFill(start_color="DDEBF7", end_color="DDEBF7", fill_type="solid"), "1F3864"),
+        "void": (PatternFill(start_color="D1D5DB", end_color="D1D5DB", fill_type="solid"), "4B5563"),
+    }
+    thin_border = Border(left=Side(style='thin', color='B0B0B0'), right=Side(style='thin', color='B0B0B0'),
+                         top=Side(style='thin', color='B0B0B0'), bottom=Side(style='thin', color='B0B0B0'))
+    center = Alignment(horizontal="center", vertical="center")
+
+    headers = ["م", "وحدة المرور", "رقم اللوحة", "اسم المؤمن له", "المبلغ (جنيه)",
+               "وقت الطباعة", "رقم الشاسية", "رقم الموتور", "الماركة",
+               "الطراز", "المدة التأمينية", "اسم الملف", "نوع المعاملة", "داخل الإجمالي (1=نعم)"]
+    counted = counted_ids(records)
+
+    ws.row_dimensions[1].height = 28
+    for col_idx, h in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col_idx, value=h)
+        cell.font, cell.fill, cell.alignment = font_header, fill_header, center
+
+    current_r = 1
+    for idx, rec in enumerate(records, 1):
+        current_r += 1
+        ws.row_dimensions[current_r].height = 22
+        amt_value = -float(rec['amount']) if rec.get('is_void') else float(rec['amount'])
+        row_data = [idx, rec['unit'], str(rec['plate']), rec['insured'], amt_value,
+                    rec['time'], str(rec['chassis']), str(rec['motor']), rec['make'],
+                    rec['model'], rec['period'], rec['file'], rec['status_text'], 1 if id(rec) in counted else 0]
+        style = KIND_STYLE.get(rec["kind"])
+        for col_idx, val in enumerate(row_data, 1):
+            cell = ws.cell(row=current_r, column=col_idx, value=val)
+            cell.font, cell.border, cell.alignment = font_regular, thin_border, center
+            if style:
+                cell.fill = style[0]
+                cell.font = Font(name="Arial", size=11, bold=True, color=style[1])
+            if col_idx == 5:
+                cell.number_format = '#,##0.00'
+
+    last_data = max(2, current_r)
+    ws.auto_filter.ref = f"A1:N{last_data}"
+    ws.freeze_panes = "A2"
+
+    current_r += 1
+    tot_label = ws.cell(row=current_r, column=2, value="الصافي الفعلي العام")
+    tot_label.font, tot_label.fill, tot_label.border = Font(name="Arial", size=12, bold=True), fill_total, thin_border
+    
+    valid_count = len(counted)
+    cnt_cell = ws.cell(row=current_r, column=4, value=valid_count)
+    cnt_cell.font, cnt_cell.fill, cnt_cell.alignment, cnt_cell.border = Font(name="Arial", size=12, bold=True), fill_total, center, thin_border
+    sum_cell = ws.cell(row=current_r, column=5, value=f"=SUMPRODUCT(E2:E{last_data},N2:N{last_data})")
+    sum_cell.font, sum_cell.fill, sum_cell.alignment, sum_cell.border = Font(name="Arial", size=12, bold=True, color="C00000"), fill_total, center, thin_border
+    sum_cell.number_format = '#,##0.00'
+
+    for col_i in range(1, 15): ws.column_dimensions[get_column_letter(col_i)].width = 20
+    ws.column_dimensions['D'].width = 32
+    ws.column_dimensions['L'].width = 30
+    ws.column_dimensions['M'].width = 28
+    
+    try:
+        wb.save(out_file)
+    except Exception:
+        alt_path = out_file.replace(".xlsx", f"_{int(time.time())}.xlsx")
+        try: wb.save(alt_path)
+        except Exception as _e: _log_silent("write_report#1", _e)
+    return out_file
+
+def _content_stream_bytes(data, page_body):
+    m = re.search(rb"/Contents\s+(\d+)\s+0\s+R", page_body)
+    if not m: return b""
+    om = re.search(rb"(?<!\d)" + m.group(1) + rb"\s+0\s+obj\s*<<(.*?)>>\s*stream\r?\n", data, re.S)
+    if not om: return b""
+    st = om.end()
+    en = data.find(b"endstream", st)
+    raw = bytes(data[st:en])
+    if b"FlateDecode" in om.group(1):
+        try: return zlib.decompress(raw)
+        except Exception: return b""
+    return raw
+
+def _find_qr_top(content):
+    best = None
+    for m in re.finditer(rb"([-\d.]+)\s+0\s+0\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+cm\s*/\w+\s+Do", content):
+        try: w, h, x, y = [float(v) for v in m.groups()]
+        except ValueError: continue
+        top = y + h if h > 0 else y
+        area = abs(w * h)
+        if best is None or area > best[0]:
+            best = (area, top)
+    return best[1] if best else None
+
+def get_print_time_bottom(pdf_path):
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    try:
+        res = subprocess.run([PDFTOTEXT_EXE, "-bbox", pdf_path, "-"], stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore",
+                             creationflags=flags, timeout=45)
+    except Exception as e:
+        log_exception("bbox", e)
+        return None
+    out = res.stdout or ""
+    pm = re.search(r'<page\s+width="([\d.]+)"\s+height="([\d.]+)"', out)
+    if not pm: return None
+    best = None
+    for m in re.finditer(r'<word\s+xMin="[\d.]+"\s+yMin="[\d.]+"\s+xMax="[\d.]+"\s+yMax="([\d.]+)">(\d{2}:\d{2})</word>', out):
+        best = float(m.group(1))
+    if best is None: return None
+    return best, float(pm.group(2))
+
+PRINT_TARGET_W_PT = 57 / 25.4 * 72   # عرض الطباعة المطلوب: 57 مم
+
+def scale_pdf_to_print_width(src_pdf, target_w=None, target_h=None):
+    """ينشئ نسخة مؤقتة من الـ PDF بمقاس الورق المختار (عرض وطول) مع الحفاظ على التناسب.
+    يدعم التصغير والتكبير ليعكس أي تعديل في مقاس الطباعة فعليًا بدون الحاجة لصلاحيات أدمن."""
+    if not PYPDF_AVAILABLE:
+        return None
+    if target_w is None:
+        target_w = _PRINT_PAPER_MM[0] / 25.4 * 72.0
+    if target_h is None:
+        target_h = _PRINT_PAPER_MM[1] / 25.4 * 72.0
+    try:
+        reader = PdfReader(src_pdf)
+        if not reader.pages:
+            return None
+        pw = float(reader.pages[0].mediabox.width)
+        ph = float(reader.pages[0].mediabox.height)
+        if pw <= 0 or ph <= 0:
+            return None
+        f = min(target_w / pw, target_h / ph)
+        if abs(f - 1.0) < 0.01:
+            return None
+        writer = PdfWriter()
+        for pg in reader.pages:
+            pg = writer.add_page(pg)   # لازم الصفحة تتسجل في الـ writer الأول قبل التعديل (pypdf 7 بيرفض scale على صفحة يتيمة)
+            pg.scale_by(f)
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, "s_" + os.path.basename(src_pdf))
+        with open(dst, "wb") as fh:
+            writer.write(fh)
+        return dst
+    except Exception as e:
+        log_exception("scale_pdf_to_print_width", e)
+        return None
+
+def create_test_print_pdf(filepath, w_mm, h_mm):
+    """إيصال اختبار صغير بإطار واضح ومقاس الورقة بالمم للتحقق الفوري من مقاس الطباعة."""
+    if not REPORTLAB_AVAILABLE:
+        return False
+    pt = 72.0 / 25.4
+    pw, ph = float(w_mm) * pt, float(h_mm) * pt
+    c = canvas.Canvas(filepath, pagesize=(pw, ph))
+    m = 4.0
+    c.setStrokeColorRGB(0, 0, 0)
+    c.setLineWidth(1.5)
+    c.rect(m, m, max(10, pw - 2 * m), max(10, ph - 2 * m))
+    c.setFillColorRGB(0, 0, 0)
+    c.setFont("Helvetica-Bold", max(8, min(13, pw * 0.08)))
+    c.drawCentredString(pw / 2, ph * 0.66, "A2R TEST PRINT")
+    c.setFont("Helvetica-Bold", max(8, min(14, pw * 0.09)))
+    c.drawCentredString(pw / 2, ph * 0.48, f"{_fmt_mm(w_mm)} x {_fmt_mm(h_mm)} mm")
+    c.setFont("Helvetica", max(6, min(9, pw * 0.055)))
+    c.drawCentredString(pw / 2, ph * 0.28, datetime.datetime.now().strftime("%d-%m-%Y  %H:%M"))
+    c.save()
+    return True
+
+def _make_print_copy_pypdf(src_pdf):
+    """بديل آمن للقص باستخدام pypdf في حال كانت بنية ملف الـ PDF مضغوطة أو غير متوافقة مع التعديل المباشر."""
+    if not PYPDF_AVAILABLE:
+        return None
+    try:
+        reader = PdfReader(src_pdf)
+        if not reader.pages:
+            return None
+        pg = reader.pages[0]
+        x0, y0 = float(pg.mediabox.left), float(pg.mediabox.bottom)
+        x1, y1 = float(pg.mediabox.right), float(pg.mediabox.top)
+
+        new_y0 = None
+        try:
+            contents = pg.get_contents()
+            raw_c = contents.get_data() if contents is not None else b""
+            qr_top = _find_qr_top(raw_c)
+            if qr_top is not None:
+                new_y0 = qr_top + 4.5
+        except Exception as _e:
+            _log_silent("make_print_copy_pypdf#qr", _e)
+
+        if new_y0 is None:
+            info = get_print_time_bottom(src_pdf)
+            if info:
+                new_y0 = y1 - (info[0] + 12.0)
+
+        if new_y0 is None:
+            return None
+        new_y0 = max(y0, new_y0)
+        if new_y0 >= y1 - 40:
+            return None
+
+        pg.mediabox.lower_left = (x0, new_y0)
+        pg.mediabox.upper_right = (x1, y1)
+        pg.cropbox.lower_left = (x0, new_y0)
+        pg.cropbox.upper_right = (x1, y1)
+
+        writer = PdfWriter()
+        writer.add_page(pg)
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, os.path.basename(src_pdf))
+        with open(dst, "wb") as fh:
+            writer.write(fh)
+        return dst
+    except Exception as e:
+        log_exception("make_print_copy_pypdf", e)
+        return None
+
+def make_print_copy(src_pdf):
+    try:
+        data = bytearray(open(src_pdf, "rb").read())
+        page_obj = None
+        for m in re.finditer(rb"\d+\s+0\s+obj(.*?)endobj", data, re.S):
+            if re.search(rb"/Type\s*/Page(?![A-Za-z])", m.group(1)):
+                page_obj = m
+                break
+        if not page_obj:
+            return _make_print_copy_pypdf(src_pdf)
+        page_body = bytes(data[page_obj.start(1):page_obj.end(1)])
+        mb = re.search(rb"/MediaBox\s*\[\s*([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s+([-\d.]+)\s*\]", page_body)
+        if not mb:
+            return _make_print_copy_pypdf(src_pdf)
+        x0, y0, x1, y1 = [float(v) for v in mb.groups()]
+
+        new_y0 = None
+        qr_top = _find_qr_top(_content_stream_bytes(data, page_body))
+        if qr_top is not None:
+            new_y0 = qr_top + 4.5
+        else:
+            info = get_print_time_bottom(src_pdf)
+            if info:
+                new_y0 = y1 - (info[0] + 12.0)
+
+        if new_y0 is None:
+            return _make_print_copy_pypdf(src_pdf)
+        new_y0 = max(y0, new_y0)
+        if new_y0 >= y1 - 40:
+            return None
+
+        new_y1 = y1
+
+        base = page_obj.start(1)
+        reg_start, reg_end = base + mb.start(), base + mb.end()
+        while True:
+            nxt = re.match(rb"\s*/(?:BleedBox|TrimBox|CropBox|ArtBox)\s*\[[^\]]*\]", bytes(data[reg_end:reg_end + 200]))
+            if not nxt: break
+            reg_end += nxt.end()
+
+        box = f"[{x0:g} {new_y0:.3f} {x1:g} {new_y1:.3f}]".encode()
+        old_len = reg_end - reg_start
+        new = b"/MediaBox " + box + b" /CropBox " + box
+        if len(new) > old_len: new = b"/MediaBox " + box
+        if len(new) > old_len:
+            return _make_print_copy_pypdf(src_pdf)
+
+        new = new + b" " * (old_len - len(new))
+        data[reg_start:reg_end] = new
+
+        os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+        dst = os.path.join(PRINT_TEMP_DIR, os.path.basename(src_pdf))
+        with open(dst, "wb") as f:
+            f.write(data)
+        return dst
+    except Exception as e:
+        log_exception("make_print_copy", e)
+        return _make_print_copy_pypdf(src_pdf)
+
+
+class ConsoleLogic:
+    """دوال CustomTkinterApp من collect.py (v97) منقولة حرف بحرف — الواجهة Qt بترث منها."""
+
+    def validate_numeric_input(self, val):
+        if val == "": return True
+        return bool(re.match(r"^[\d,]*\.?\d*$", val))
+
+    def _run_archive_sweep(self, folder_path, progress=None, stage=None):
+        """كنس + تحديث ملخصات الأيام اللي اتغيّرت. آمنة لو اتنادت من أكتر من مكان.
+        بترجّع None لو كنسة تانية شغالة بالفعل (يعني ماحصلش شغل)، وإلا عدد الملفات المنقولة.
+        stage(i, n, name): بتبلّغ تقدّم مرحلة بناء الملخصات/الإكسيل (بعد ما النقل يخلص)."""
+        if not _SWEEP_LOCK.acquire(blocking=False): return None
+        moved = 0
+        try:
+            moved, touched = archive_sweep(folder_path, progress)
+            _touched = sorted(touched)
+            for _i, d_folder in enumerate(_touched, 1):
+                d_name = os.path.basename(d_folder)
+                if stage:
+                    try: stage(_i, len(_touched), d_name)
+                    except Exception as _e: _log_silent("run_archive_sweep#stage", _e)
+                parent_m = os.path.basename(os.path.dirname(d_folder))
+                parent_y = os.path.basename(os.path.dirname(os.path.dirname(d_folder)))
+                tag = f"{d_name}-{parent_m.split('-')[0]}-{parent_y}"
+                self._generate_day_summary_pdf(d_folder, tag, archive_day_records(d_folder))
+                try:
+                    _dd = datetime.date(int(parent_y), int(parent_m.split("-")[0]), int(d_name))
+                    archive_write_day_excel(d_folder, _dd)
+                except Exception as _e:
+                    log_exception("archive_day_excel", _e)
+        except Exception as e:
+            log_exception("run_archive_sweep", e)
+        finally:
+            _SWEEP_LOCK.release()
+        if moved: self._start_archive_maintenance(folder_path)
+        return moved
+
+    def _archive_tick(self):
+        """كل 10 دقايق: أي ملف مش بتاع النهارده يتأرشف (يغطي تغيير اليوم والملفات اللي فشلت قبل كده)."""
+        try:
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            if folder and os.path.isdir(folder) and not self.processing_lock.locked():
+                threading.Thread(target=self._run_archive_sweep, args=(folder,), daemon=True).start()
+        except Exception as e:
+            log_exception("archive_tick", e)
+        finally:
+            self.after(600000, self._archive_tick)
+
+    def _cancel_auto_minimize(self):
+        if self._auto_minimize_timer:
+            try:
+                self.after_cancel(self._auto_minimize_timer)
+            except Exception as _e:
+                _log_silent("_cancel_auto_minimize#1", _e)
+            self._auto_minimize_timer = None
+
+    def _schedule_auto_minimize(self, delay_ms):
+        self._cancel_auto_minimize()
+        self._auto_minimize_timer = self.after(delay_ms, self._auto_minimize_to_taskbar)
+
+    def _on_user_interaction(self, event=None):
+        if not self.is_mini_mode and self.state() == "normal":
+            self._schedule_auto_minimize(30000)
+
+    def _auto_minimize_to_taskbar(self):
+        try:
+            if self._has_open_child_windows():
+                self._schedule_auto_minimize(15000)
+                return
+            if self.state() == "normal":
+                self.iconify()
+        except Exception as _e:
+            _log_silent("_auto_minimize_to_taskbar#1", _e)
+
+    def _paper_btn_text(self):
+        return f"⚙️ {print_paper_label()}"
+
+    def reprint_receipt_record(self, rec):
+        fpath = rec.get("path", "")
+        if not fpath or not os.path.exists(fpath):
+            candidates = [
+                os.path.join(self.get_clean_path(), rec.get("file", "")),
+                os.path.join(self.get_clean_path(), "_" + rec.get("file", "").lstrip("_"))
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    fpath = c
+                    break
+
+        if fpath and os.path.exists(fpath):
+            if self.send_to_thermal_printer_57x90(fpath):
+                play_sound_matched()
+                messagebox.showinfo(tr("done"), tr("reprint_success"))
+            else:
+                messagebox.showerror("Error", T2("تعذرت الطباعة. اتأكد من الطابعة وحاول تاني.",
+                                                 "Printing failed. Check the printer and try again."))
+        else:
+            messagebox.showerror("Error", f"File not found: {rec.get('file', '')}")
+
+    def reprint_last_receipt(self):
+        """إعادة طباعة آخر إيصال تم طباعته (أو أحدث إيصال في المجلد اليوم لو البرنامج لسه مفتوح)."""
+        self._cancel_auto_minimize()
+        target = self.last_printed_pdf if (self.last_printed_pdf and os.path.exists(self.last_printed_pdf)) else None
+        if not target:
+            p = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            if p and os.path.isdir(p):
+                today_d = datetime.date.today()
+                best_mt, best_p = 0.0, None
+                try:
+                    with os.scandir(p) as it:
+                        for ent in it:
+                            if not ent.is_file(): continue
+                            fn = ent.name
+                            fn_l = fn.lower()
+                            if not fn_l.endswith(".pdf") or fn_l.endswith("_cropped.pdf") or fn_l.endswith("_summary.pdf"):
+                                continue
+                            if not (fn_l.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fn)):
+                                continue
+                            if fn.lstrip("_") in _VOID_KEYS:
+                                continue
+                            st = ent.stat()
+                            if datetime.date.fromtimestamp(st.st_mtime) == today_d and st.st_mtime > best_mt:
+                                best_mt, best_p = st.st_mtime, ent.path
+                except Exception as e:
+                    log_exception("reprint_last_scan", e)
+                target = best_p
+
+        if not target or not os.path.exists(target):
+            messagebox.showinfo(T2("تنبيه", "Notice"),
+                                T2("لا يوجد إيصال مطبوع اليوم لإعادة طباعته.", "No receipt printed today to reprint."))
+            if self.is_mini_mode:
+                self._schedule_auto_minimize(5000)
+            return
+
+        self.last_printed_pdf = target
+        try: self.btn_mini_reprint.configure(state="disabled")
+        except Exception as _e: _log_silent("reprint_last#dis", _e)
+
+        def _work():
+            ok = self.send_to_thermal_printer_57x90(target)
+            def _done():
+                try: self.btn_mini_reprint.configure(state="normal")
+                except Exception as _e: _log_silent("reprint_last#en", _e)
+                if ok:
+                    play_sound_matched()
+                    self._tray_notify(T2(f"تمت إعادة طباعة: {os.path.basename(target)}",
+                                         f"Reprinted: {os.path.basename(target)}"))
+                else:
+                    messagebox.showerror("Error", T2("تعذرت الطباعة. اتأكد من الطابعة وحاول تاني.",
+                                                     "Printing failed. Check the printer and try again."))
+                if self.is_mini_mode:
+                    self._schedule_auto_minimize(5000)
+            self.run_on_main(_done)
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _sync_watch_path(self):
+        try: self._watch_path = self.get_clean_path()
+        except Exception as _e: _log_silent("_sync_watch_path#1", _e)
+        try: self.after(1000, self._sync_watch_path)
+        except Exception as _e: _log_silent("_sync_watch_path#2", _e)
+
+    def request_full_console(self):
+        old = getattr(self, "_login_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("request_full_console#exists", _e)
+        self._cancel_auto_minimize()
+        self._login_win = ElevateLoginGate(self, self.unlock_full_console)
+
+    def unlock_full_console(self, is_supervisor):
+        self.is_supervisor = is_supervisor
+
+        # كل الصلاحيات متاحة للجميع (مستخدم أو مشرف) ما عدا زر الإكسل: حصري للمشرف
+        for w in (self.cb_d, self.cb_m, self.cb_y):
+            w.configure(state="normal")
+        for w in (self.btn_yesterday, self.btn_browse, self.btn_open_f):
+            w.configure(state="normal")
+
+        self.btn_excel.pack_forget()
+        self.btn_arch_full.pack_forget()
+        self.btn_chrome.pack_forget()
+        if is_supervisor:
+            self.badge_role.configure(text="● ADMIN", text_color="#DC2626")
+            self.f_role_btn.configure(border_color="#DC2626")
+            self.btn_arch_full.pack(side="left", padx=2)
+            self.btn_excel.pack(side="left", padx=2)   # زر الإكسيل حصري للمشرف — كان مضروب pack_forget من غير ما يترجع
+        else:
+            self.badge_role.configure(text="● USER", text_color="#059669")
+            self.f_role_btn.configure(border_color="#059669")
+        self.btn_chrome.pack(side="left", padx=2)
+
+        self.switch_to_full_view()
+        # حساب إجمالي إيصالات اليوم الموجودة فور الدخول للنسخة الكاملة بدون انتظار نزول ملف جديد
+        if self.auto_sync_enabled and not self.is_processing:
+            self.after(250, self.start_thread)
+        # أرشفة تلقائية لكل الأيام السابقة فور الدخول (مستخدم أو مشرف) مع إظهار نافذة التقدم
+        self.after(400, self.auto_archive_on_login)
+        if not getattr(self, "_archive_tick_started", False):
+            self._archive_tick_started = True
+            self.after(600000, self._archive_tick)
+
+    def _archive_done_today(self):
+        today_tag = datetime.date.today().strftime("%Y-%m-%d")
+        try:
+            conn = db_connect()
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_date'")
+            row = c.fetchone()
+            conn.close()
+            return bool(row) and row[0] == today_tag
+        except Exception as e:
+            log_exception("archive_done_today", e)
+            return False
+
+    def _mark_archive_done_today(self):
+        today_tag = datetime.date.today().strftime("%Y-%m-%d")
+        try:
+            conn = db_connect()
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_date', ?)", (today_tag,))
+            c.execute("INSERT OR REPLACE INTO system_meta (meta_key, meta_value) VALUES ('last_full_archive_time', ?)",
+                      (datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            log_exception("mark_archive_done_today", e)
+
+    def _archive_done_time(self):
+        """وقت آخر أرشفة ناجحة على الجهاز ده (HH:MM) لو اتعملت النهارده، وإلا نص فاضي."""
+        try:
+            conn = db_connect()
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS system_meta (meta_key TEXT PRIMARY KEY, meta_value TEXT)")
+            c.execute("SELECT meta_value FROM system_meta WHERE meta_key = 'last_full_archive_time'")
+            row = c.fetchone()
+            conn.close()
+            val = row[0] if row else ""
+            if val.startswith(datetime.date.today().strftime("%Y-%m-%d")):
+                return val[11:16]
+        except Exception as e:
+            log_exception("archive_done_time", e)
+        return ""
+
+    def _archive_fill_missing(self, folder_path):
+        """يكمّل أي يوم مؤرشف ناقصه إيصال السمري أو إكسيل اليوم (الأيام الكاملة بتتخطى فورًا).
+        بترجّع عدد الأيام اللي اتكمّلت، أو None لو في فهرسة تانية شغالة وماخلصتش."""
+        root = os.path.join(folder_path, ARCHIVE_DIRNAME)
+        if not os.path.isdir(root): return 0
+        if not _ARCHIVE_LOCK.acquire(timeout=120): return None
+        built = 0
+        try:
+            todo = []
+            for dp, _dn, fns in os.walk(root):
+                parts = os.path.relpath(dp, root).split(os.sep)
+                if len(parts) != 3: continue
+                try: d = datetime.date(int(parts[0]), int(parts[1].split("-")[0]), int(parts[2]))
+                except Exception: continue
+                if not any(f.lower().endswith((".pdf", ".txt")) and not f.startswith(("Samary_", "Details_"))
+                           and not f.endswith(("_cropped.pdf", "_Summary.pdf")) for f in fns): continue
+                need_pdf = REPORTLAB_AVAILABLE and not any(f.startswith("Samary_") and f.lower().endswith(".pdf") for f in fns)
+                need_xlsx = OPENPYXL_AVAILABLE and not os.path.exists(archive_day_excel_path(dp, d))
+                if need_pdf or need_xlsx: todo.append((dp, d, need_pdf, need_xlsx))
+            for dp, d, need_pdf, need_xlsx in sorted(todo, key=lambda x: x[1]):
+                try:
+                    tag = d.strftime("%d-%m-%Y")
+                    if need_pdf:
+                        recs = archive_day_records(dp)
+                        if recs: self._generate_day_summary_pdf(dp, tag, recs)
+                    if need_xlsx: archive_write_day_excel(dp, d)
+                    if (need_pdf and os.path.exists(os.path.join(dp, f"Samary_{tag}.pdf"))) or \
+                       (need_xlsx and os.path.exists(archive_day_excel_path(dp, d))):
+                        built += 1
+                except Exception as e:
+                    log_exception(f"archive_fill_missing:{dp}", e)
+        finally:
+            _ARCHIVE_LOCK.release()
+        return built
+
+    def _refresh_mini_archive_label(self):
+        lbl = getattr(self, "lbl_mini_archive", None)
+        if lbl is None:
+            return
+        try:
+            t = THEMES[self.current_theme_name]
+            if getattr(self, "_auto_archive_running", False):
+                lbl.configure(text=T2("⏳ الأرشفة التلقائية: جاري التحديث...", "⏳ Auto-Archive: Updating..."),
+                              text_color=t["warning"])
+            elif self._archive_done_today():
+                tm = self._archive_done_time()
+                suf = f" ({tm})" if tm else ""
+                lbl.configure(text=T2(f"● الأرشفة التلقائية: مكتملة اليوم ✓{suf}", f"● Auto-Archive: Completed today ✓{suf}"),
+                              text_color=t["success"])
+            else:
+                lbl.configure(text=T2("● الأرشفة التلقائية: جاهزة في الخلفية", "● Auto-Archive: Ready in background"),
+                              text_color=t["text_muted"])
+        except Exception as _e:
+            _log_silent("refresh_mini_archive_label", _e)
+
+    def auto_archive_on_login(self):
+        """تعمل تلقائيًا فور تشغيل الجهاز/البرنامج (في الميني أو بجوار الساعة) وحتى في أول تشغيل للتطبيق:
+        - كنس كل ملفات الأيام السابقة للأرشيف + توليد إيصال السمري وإكسيل اليوم لكل يوم مؤرشف.
+        - استكمال أي سمري أو إكسيل ناقص لأيام مؤرشفة سابقًا + تحديث فهرس البحث FTS5 في الخلفية."""
+        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+        if not folder or not os.path.isdir(folder):
+            return
+        if getattr(self, "_auto_archive_running", False):
+            return
+        done_today = self._archive_done_today()
+        self._auto_archive_running = True
+        self._refresh_mini_archive_label()
+
+        def work():
+            swept, ok, filled = 0, False, 0
+            try:
+                if not done_today:
+                    r = self._run_archive_sweep(folder)
+                    if r is not None:             # None = كنسة تانية شغالة، هنحاول تاني في الدورة الجاية
+                        swept, ok = r, True
+                filled = self._archive_fill_missing(folder) or 0
+                if ok or (not done_today and filled >= 0):
+                    self._mark_archive_done_today()
+                    self._start_archive_maintenance(folder)
+                elif filled > 0:
+                    self._start_archive_maintenance(folder)
+            except Exception as e:
+                log_exception("auto_archive_on_login", e)
+            finally:
+                self._auto_archive_running = False
+            self.run_on_main(self._refresh_mini_archive_label)
+            if ok or filled:
+                self.run_on_main(lambda: self._notify_archive_done(swept, filled))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _tray_notify(self, msg, title="A2R Console", _attempt=0):
+        """إشعار ويندوز من أيقونة البرنامج بجوار الساعة."""
+        try:
+            icon = getattr(self, "tray_icon", None)
+            if icon is None:
+                return
+            if not getattr(icon, "visible", True) and _attempt < 5:   # الأيقونة لسه بتظهر: نحاول بعد ثانيتين
+                self.after(2000, lambda: self._tray_notify(msg, title, _attempt + 1))
+                return
+            icon.notify(msg, title)
+        except Exception as e:
+            log_exception("tray_notify", e)
+
+    def _notify_archive_done(self, moved=0, filled=0):
+        msg = T2("تمت الأرشفة ✓", "Archive completed ✓")
+        if filled:
+            msg += T2(f" — اتكمّل {filled} يوم ناقص", f" — completed {filled} incomplete day(s)")
+        self._tray_notify(msg)
+
+    def run_on_main(self, func):
+        # v96: من الخيط الرئيسي زي الأول؛ من أي خيط تاني بيتحط في طابور يفضّيه الخيط الرئيسي
+        # (نداء after() من خيط تاني ممكن يعلّق البرنامج أو يقفله فجأة).
+        if threading.current_thread() is threading.main_thread():
+            try:
+                self.after(0, func)
+            except Exception as e:
+                _log_silent("run_on_main", e)
+            return
+        q = getattr(self, "_main_q", None)
+        if q is not None:
+            q.put(func)
+        else:
+            try:
+                self.after(0, func)
+            except Exception as e:
+                _log_silent("run_on_main#noq", e)
+
+    def _pump_main_queue(self):
+        try:
+            for _ in range(200):
+                try:
+                    f = self._main_q.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    f()
+                except Exception as e:
+                    log_exception("run_on_main_job", e)
+            now = time.time()
+            if now - self._bridge_snap_ts >= 0.5:
+                self._bridge_snap_ts = now
+                self._refresh_bridge_snapshot()
+        except Exception as e:
+            _log_silent("pump_main_queue", e)
+        finally:
+            try:
+                self.after(40, self._pump_main_queue)
+            except Exception:
+                pass
+
+    def _refresh_bridge_snapshot(self):
+        """v96: قيم الشاشة اللي جسر كروم بيعرضها (نسبة التقدّم + التاريخ المختار) بتتقري هنا على الخيط الرئيسي بس."""
+        snap = {}
+        try:
+            snap["progress"] = float(self.progress_bar.get())
+        except Exception:
+            snap["progress"] = 0.0
+        try:
+            snap["date"] = f"{int(self.cb_y.get()):04d}-{int(self.cb_m.get()):02d}-{int(self.cb_d.get()):02d}"
+        except Exception:
+            snap["date"] = ""
+        self._bridge_snap = snap
+
+    def get_clean_path(self):
+        txt = self.e_path.get().strip()
+        if txt.startswith("✓ "): return txt[2:].strip()
+        elif txt.startswith("⚠️ "): return txt[3:].strip()
+        return txt
+
+    def set_path_with_icon(self, raw_path):
+        self.e_path.delete(0, 'end')
+        if os.path.exists(raw_path) and os.path.isdir(raw_path):
+            self.e_path.insert(0, f"✓  {raw_path}")
+        else:
+            self.e_path.insert(0, f"⚠️  {raw_path}")
+
+    def validate_path_live(self):
+        clean_p = self.get_clean_path()
+        if os.path.exists(clean_p) and os.path.isdir(clean_p):
+            if not self.e_path.get().startswith("✓ "):
+                self.e_path.delete(0, 'end')
+                self.e_path.insert(0, f"✓  {clean_p}")
+        else:
+            if not self.e_path.get().startswith("⚠️ "):
+                self.e_path.delete(0, 'end')
+                self.e_path.insert(0, f"⚠️  {clean_p}")
+
+    def update_live_clock(self):
+        now = datetime.datetime.now()
+        clock_str = now.strftime("%I:%M:%S %p")
+        if hasattr(self, 'lbl_clock'):
+            self.lbl_clock.configure(text=clock_str)
+        self.after(1000, self.update_live_clock)
+
+    def toggle_mute(self):
+        global SOUND_MUTED
+        SOUND_MUTED = not SOUND_MUTED
+        self.btn_mute.configure(text="🔇 Muted" if SOUND_MUTED else "🔊 Sound")
+        _save_app_prefs(sound_muted=SOUND_MUTED)
+
+    def _render_status_bar(self, count, total):
+        """شريط الحالة السفلي: عدد العمليات وإجمالي المبالغ (بيتحدث لايف مع كل فحص أو مسح)."""
+        self._status_count_val = count
+        self._status_total_val = total
+        try:
+            self.lbl_status_count.configure(text=T2("العمليات", "Ops") + f": {count:,}")
+            self.lbl_status_sum.configure(text=T2("الإجمالي", "Total") + f": {total:,.2f} {tr('currency')}")
+        except Exception as _e:
+            _log_silent("status_bar#render", _e)
+
+    def update_toggle_appearance(self):
+        t = THEMES[self.current_theme_name]
+        if self.auto_sync_enabled:
+            self.sw_autosync.configure(progress_color=t["success"], button_color="#FFFFFF")
+            self.lbl_sw_sync.configure(text=tr("autosync_on"), text_color=t["text"])
+        else:
+            self.sw_autosync.configure(fg_color=t["border"], button_color=t["text_muted"])
+            self.lbl_sw_sync.configure(text=tr("autosync_off"), text_color=t["text_muted"])
+
+        if self.auto_print_enabled:
+            self.sw_autoprint.configure(progress_color=t["success"], button_color="#FFFFFF")
+            self.lbl_sw_print.configure(text=tr("autoprint_on"), text_color=t["text"])
+        else:
+            self.sw_autoprint.configure(fg_color=t["border"], button_color=t["text_muted"])
+            self.lbl_sw_print.configure(text=tr("autoprint_off"), text_color=t["text_muted"])
+
+    def toggle_autosync(self):
+        self.auto_sync_enabled = bool(self.sw_autosync.get())
+        self.update_toggle_appearance()
+
+    def toggle_autoprint(self):
+        self.auto_print_enabled = bool(self.sw_autoprint.get())
+        self.update_toggle_appearance()
+        if self.auto_print_enabled:
+            p = self.get_clean_path()
+            if os.path.exists(p):
+                for f in glob.glob(os.path.join(p, "*.pdf")):
+                    fn = os.path.basename(f)
+                    self.printed_receipts_set.add(fn)
+                    self.printed_receipts_set.add(clean_download_filename(fn))
+
+    def toggle_language(self):
+        global CURRENT_LANG
+        self.current_lang = "ar" if self.current_lang == "en" else "en"
+        CURRENT_LANG = self.current_lang
+        self.apply_language(self.current_lang)
+        _save_app_prefs(lang=self.current_lang)
+
+    def apply_language(self, lang):
+        L = LANGUAGES[lang]
+        self.btn_lang.configure(text=L["toggle_btn"])
+        self.lbl_folder.configure(text=L["dir_path"])
+        self.btn_browse.configure(text=L["browse"])
+        self.btn_open_f.configure(text=L["open"])
+        self.lbl_d.configure(text=L["date_lbl"])
+        self.btn_today.configure(text=L["today"])
+        self.btn_yesterday.configure(text=L["yesterday"])
+        self.btn_run.configure(text=L["start"])
+        self.btn_manual.configure(text=L["manual"])
+        self.btn_summary_reopen.configure(text=L["summary_btn"])
+        self.btn_cash.configure(text=L["cash_btn"])
+        self.btn_archive_downloads.configure(text=L["clean_downloads"])
+        self.btn_mini_reprint.configure(text=L["mini_reprint_last"])
+        self.btn_reset.configure(text=L["reset"])
+        self.lbl_kpi1_title.configure(text=L["kpi1"])
+        self.lbl_kpi2_title.configure(text=L["kpi2"])
+        self.lbl_pos_title.configure(text=L["pos_box_title"])
+        self.btn_pos_check.configure(text=L["pos_check_btn"])
+        self.btn_view_rec.configure(text=L["view_records"])
+        self.btn_pdf_export.configure(text=L["export_pdf"])
+        self.btn_print_slip.configure(text=L["print_slip"])
+        self.btn_excel.configure(text=L["open_excel"])
+        self.btn_arch_full.configure(text=L["arch_hist_btn"])
+        self.btn_chrome.configure(text=L["open_chrome"])
+        for _cap, _ar, _en in getattr(self, "_bar_captions", []):
+            _cap.configure(text=_ar if lang == "ar" else _en)
+        self._render_status_bar(getattr(self, "_status_count_val", 0), getattr(self, "_status_total_val", 0.0))
+        self.btn_elevate.configure(text=L["btn_full_console"])
+        self.btn_back_to_mini.configure(text=L["btn_back_mini"])
+        self.lbl_mini_title.configure(text=L["mini_station_title"])
+        self.lbl_mini_desc.configure(text=L["mini_status_active"])
+        self.lbl_mini_counter.configure(text=tr("mini_printed_count", count=self.printed_count_today))
+        self.btn_fix_printer.configure(text=self._paper_btn_text())
+        self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
+        if self.last_detailed_records:
+            annotate_records(self.last_detailed_records)
+
+    def confirm_and_reset(self):
+        if messagebox.askyesno(tr("confirm_reset"), tr("confirm_reset")):
+            self.reset_all()
+
+    def clear_results(self):
+        self.progress_bar.set(0)
+        self.lbl_progress_pct.configure(text="0%")
+        self.lbl_current_file.configure(text="")
+        self.lbl_cnt.configure(text="0")
+        self.lbl_sum.configure(text=f"0.00 {tr('currency')}")
+        self._render_status_bar(0, 0.0)
+        self.lbl_diff.configure(text="")
+        self.system_total_sum = 0.0
+        self.last_generated_file = None
+        self.last_detailed_records = []
+        self.last_units_summary = {}
+        self.last_summary_info = {}
+
+    def reset_all(self):
+        self.set_path_with_icon(DEFAULT_RECEIPTS_DIR)
+        self.set_today()
+        self.clear_results()
+        self.e_pos.delete(0, 'end')
+
+    def set_today(self):
+        t = datetime.date.today()
+        self.cb_d.set(f"{t.day:02d}")
+        self.cb_m.set(f"{t.month:02d}")
+        self.cb_y.set(str(t.year))
+
+    def set_yesterday(self):
+        y = datetime.date.today() - datetime.timedelta(days=1)
+        self.cb_d.set(f"{y.day:02d}")
+        self.cb_m.set(f"{y.month:02d}")
+        self.cb_y.set(str(y.year))
+
+    def browse_folder(self):
+        f = filedialog.askdirectory(initialdir=self.get_clean_path())
+        if f:
+            self.set_path_with_icon(f)
+
+    def open_current_folder(self):
+        p = self.get_clean_path()
+        if os.path.exists(p): os.startfile(p)
+
+    def check_pos(self):
+        raw = self.e_pos.get().strip().replace(",", "")
+        if not raw or not self.last_detailed_records:
+            self.lbl_diff.configure(text="")
+            return
+        try:
+            val = float(raw)
+            diff = round(val - self.system_total_sum, 2)
+            t = THEMES[self.current_theme_name]
+            if abs(diff) < 0.01:
+                self.lbl_diff.configure(text=tr("pos_matched"), text_color=t["success"])
+                play_sound_matched()
+            elif diff < 0:
+                self.lbl_diff.configure(text=f"{tr('pos_shortage')} -{abs(diff):,.2f}", text_color=t["danger"])
+                play_sound_diff()
+            else:
+                self.lbl_diff.configure(text=f"{tr('pos_excess')} +{diff:,.2f}", text_color=t["warning"])
+                play_sound_diff()
+        except Exception:
+            self.lbl_diff.configure(text="⚠️ Error", text_color="#EF4444")
+
+    def open_chrome_browser(self):
+        target_url = "http://192.168.235.50/traffic"
+        chrome_candidates = [
+            os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+            os.path.expandvars(r"%LocalAppData%\Google\Chrome\Application\chrome.exe"),
+        ]
+        for path in chrome_candidates:
+            if os.path.exists(path):
+                subprocess.Popen([path, target_url])
+                return
+        webbrowser.open(target_url)
+
+    def init_watchdogs(self):
+        def _scan_dir(folder):
+            """قراءة سريعة لمجلد الإيصالات بـ os.scandir (بدون glob أو استدعاءات قرص مكررة).
+            ترجّع: ([(path, name, size)], set_of_crdownload_base_names)."""
+            pdfs, cr_bases = [], set()
+            try:
+                with os.scandir(folder) as it:
+                    for ent in it:
+                        name = ent.name
+                        nl = name.lower()
+                        if nl.endswith(".pdf"):
+                            try:
+                                if ent.is_file(follow_symlinks=False):
+                                    pdfs.append((ent.path, name, ent.stat(follow_symlinks=False).st_size))
+                            except OSError:
+                                pass
+                        elif nl.endswith(".crdownload"):
+                            cr_bases.add(nl[:-11])
+            except OSError:
+                pass
+            return pdfs, cr_bases
+
+        def _routine():
+            # استبعاد وتسكين الملفات الموجودة قبل تشغيل البرنامج
+            initial_path = self._watch_path
+            last_seeded = None   # آخر مجلد اتعلّمت ملفاته "اتطبعت"
+            if initial_path and os.path.isdir(initial_path):
+                try:
+                    pdfs, _ = _scan_dir(initial_path)
+                    for _, fn, _ in pdfs:
+                        self.printed_receipts_set.add(fn)
+                        self.printed_receipts_set.add(clean_download_filename(fn))
+                    last_seeded = initial_path
+                except Exception as e:
+                    log_exception("init_watchdogs_seed", e)
+
+            _last_sync = [0.0]
+            while True:
+                time.sleep(0.5 if self.auto_print_enabled else 2)
+                try:
+                    p = self._watch_path
+                    if not p or not os.path.isdir(p): continue
+
+                    # تصفير عدّاد المطبوعات تلقائيًا عند بداية يوم جديد مع الحفاظ على منع إعادة طباعة الملفات القديمة
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
+                        self.last_printed_pdf = None
+                        self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                            text=tr("mini_printed_count", count=0)))
+                        pdfs_now, _ = _scan_dir(p)
+                        keep = set()
+                        for _, fn, _ in pdfs_now:
+                            keep.add(fn)
+                            keep.add(clean_download_filename(fn))
+                        self.printed_receipts_set = keep
+
+                    if p != last_seeded:
+                        # مجلد جديد اتختار: الملفات اللي فيه دلوقتي قديمة، مش بتتطبع تلقائيًا.
+                        # الطباعة التلقائية بتشتغل بس على الملفات اللي تظهر بعد كده.
+                        pdfs_s, _ = _scan_dir(p)
+                        for _, fn, _ in pdfs_s:
+                            self.printed_receipts_set.add(fn)
+                            self.printed_receipts_set.add(clean_download_filename(fn))
+                        last_seeded = p
+                        continue
+                    if not (self.auto_print_enabled or self.auto_sync_enabled): continue
+
+                    pdf_entries, cr_bases = _scan_dir(p)
+
+                    if self.auto_print_enabled:
+                        for pdf_file, fname, fsize in pdf_entries:
+                            fl = fname.lower()
+                            if fl.endswith("_cropped.pdf") or fl.endswith("_summary.pdf"):
+                                continue
+                            if not (fl.startswith("quote_receipt_") or MANUAL_NAME_RE.match(fname)):
+                                continue
+                            if fname.lstrip("_") in _VOID_KEYS:
+                                continue
+                            clean_fn = clean_download_filename(fname)
+                            if clean_fn not in self.printed_receipts_set and fname not in self.printed_receipts_set:
+                                if fl not in cr_bases and fsize > 1000 and _is_pdf_ready(pdf_file):
+                                    self.printed_receipts_set.add(fname)
+                                    self.printed_receipts_set.add(clean_fn)
+                                    self._print_queue.put(pdf_file)   # الطباعة في thread مستقل، المراقبة تكمل فورًا
+
+                    if (self.auto_sync_enabled and not self.is_processing
+                            and time.time() - _last_sync[0] >= 2):
+                        _last_sync[0] = time.time()
+                        try:
+                            valid = [(fn, sz) for _, fn, sz in pdf_entries
+                                     if not fn.lower().endswith(("_summary.pdf", "_cropped.pdf"))]
+                            current_sig = f"{len(valid)}_{sum(sz for _, sz in valid)}"
+                            if self.last_pdf_state_sig == "":
+                                self.last_pdf_state_sig = current_sig
+                            elif current_sig != self.last_pdf_state_sig:
+                                self.last_pdf_state_sig = current_sig
+                                self.run_on_main(self.start_thread)
+                        except Exception as _e: _log_silent("_routine#2", _e)
+                except Exception as e:
+                    log_exception("watchdog_loop", e)
+
+        def _print_worker():
+            while True:
+                pdf = self._print_queue.get()
+                fname = os.path.basename(pdf)
+                self.last_printed_pdf = pdf
+                try: ok = self.send_to_thermal_printer_57x90(pdf)
+                except Exception as e:
+                    log_exception(f"print_worker:{fname}", e)
+                    ok = False
+                if ok:
+                    today_d = datetime.date.today()
+                    if today_d != self._printed_count_day:
+                        self._printed_count_day = today_d
+                        self.printed_count_today = 0
+                    self.printed_count_today += 1
+                    self.run_on_main(lambda: self.lbl_mini_counter.configure(
+                        text=tr("mini_printed_count", count=self.printed_count_today)))
+                else:
+                    # مفيش إعادة طباعة تلقائية (ممكن تطلّع إيصال مكرر للعميل): بنبلّغ المستخدم وهو يعيد الطباعة
+                    self.run_on_main(lambda fn=fname: self._tray_notify(
+                        T2(f"تعذرت طباعة الإيصال: {fn}", f"Printing failed: {fn}"), "A2R Console"))
+
+        self._print_queue = queue.Queue()
+        threading.Thread(target=_print_worker, daemon=True).start()
+        threading.Thread(target=_routine, daemon=True).start()
+
+    def send_to_thermal_printer_57x90(self, pdf_file_path, is_test=False):
+        """يطبع إيصال على المقاس المختار. بيرجّع True لو الطباعة اتبعتت، False لو فشلت أو الطابعة معلّقة."""
+        temp_copy = None
+        scaled_copy = None
+        ok = False
+        with _PRINT_LOCK:
+            try:
+                sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                if not os.path.exists(sumatra_path):
+                    sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+
+                target = pdf_file_path
+                clean_name = os.path.basename(pdf_file_path).lstrip("_")
+                is_manual_pdf = bool(MANUAL_NAME_RE.match(clean_name))
+                if not is_test and clean_name.lower().startswith("quote_receipt_"):
+                    temp_copy = make_print_copy(pdf_file_path)
+                    if temp_copy:
+                        target = temp_copy
+
+                if not is_test and not is_manual_pdf:
+                    scaled_copy = scale_pdf_to_print_width(target)
+                if scaled_copy:
+                    target = scaled_copy
+
+                use_noscale = bool(is_test or is_manual_pdf or scaled_copy)
+                if os.path.exists(sumatra_path):
+                    cmd = [
+                        sumatra_path,
+                        "-print-to-default",
+                        "-print-settings", print_settings_arg(scaled=use_noscale),
+                        "-silent",
+                        target
+                    ]
+                    r = subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
+                    ok = (r.returncode == 0)
+                    if not ok:
+                        log_exception(f"auto_print_rc:{os.path.basename(pdf_file_path)}", f"SumatraPDF exit code {r.returncode}")
+                else:
+                    if sys.platform == "win32":
+                        os.startfile(target, "print")
+                        ok = True
+            except Exception as e:
+                log_exception(f"auto_print:{os.path.basename(pdf_file_path)}", e)
+        # مسح الملفات المؤقتة في الخلفية: قبل كده كانت بتستنى ثانية كاملة وتعطّل الإيصال اللي بعده
+        tmp_files = [x for x in (temp_copy, scaled_copy) if x]
+        if tmp_files:
+            def _cleanup(files=tmp_files):
+                for _tmp in files:
+                    try: os.remove(_tmp)
+                    except Exception as _e: _log_silent("send_to_thermal_printer_57x90#1", _e)
+            _t = threading.Timer(5.0, _cleanup)
+            _t.daemon = True
+            _t.start()
+        return ok
+
+    def _generate_day_summary_pdf(self, day_folder_path, date_str, records_list):
+        if not REPORTLAB_AVAILABLE or not records_list: return
+        pdf_path = os.path.join(day_folder_path, f"Samary_{date_str}.pdf")
+        try:
+            total_sum, total_cnt = counted_totals(records_list)
+            pdf_cnt = sum(1 for r in records_list if not r.get('is_manual') and not r.get('is_void'))
+            manual_cnt = sum(1 for r in records_list if r.get('is_manual') and not r.get('is_void'))
+            void_cnt = sum(1 for r in records_list if r.get('is_void'))
+            units_set = set(r['unit'] for r in records_list if not r.get('is_void'))
+            unit_name = " + ".join(units_set) if units_set else "وحدة غير محددة"
+
+            _su = summary_unit_load(_day_iso_from_label(date_str))
+            render_summary_slip(   # v96: نفس الرسم الموحّد (عنوان الأرشيف ومقاساته زي ما كانت)
+                pdf_path, title="ملخص الفحص المؤرشف", subtitle=f"Date: {date_str}",
+                unit_label=unit_name, date_label=date_str, total_count=total_cnt, pdf_count=pdf_cnt,
+                manual_count=manual_cnt, void_count=void_cnt, total_sum=total_sum,
+                chosen_unit=(_su[0] if _su else ""), chosen_tid=(_su[1] if _su else ""),
+                total_label="إجمالي المبالغ:",
+                footer_top=f"Archived: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                footer_bottom=f"A2R Console {APP_VERSION} • {APP_OWNER}",
+                show_date_row=False, big=False)
+        except Exception as e:
+            log_exception("generate_day_summary_pdf", e)
+
+    def start_thread(self):
+        L = LANGUAGES[self.current_lang]
+        if not self.processing_lock.acquire(blocking=False): return
+
+        try:
+            target_date = datetime.date(int(self.cb_y.get()), int(self.cb_m.get()), int(self.cb_d.get()))
+        except Exception:
+            self.processing_lock.release()
+            messagebox.showerror("Error", L["invalid_date"])
+            return
+
+        folder_path = self.get_clean_path()
+        if not os.path.exists(folder_path):
+            self.processing_lock.release()
+            messagebox.showerror("Error", L["dir_missing"])
+            return
+
+        if not os.path.exists(PDFTOTEXT_EXE):
+            self.processing_lock.release()
+            messagebox.showerror("Error", f"{L['pdf_missing']}{BASE_DIR}")
+            return
+
+        if not OPENPYXL_AVAILABLE:
+            self.processing_lock.release()
+            messagebox.showerror("Error", "openpyxl is not installed.")
+            return
+
+        self.btn_run.configure(state="disabled")
+        self.is_processing = True
+        threading.Thread(target=self.process_files, args=(folder_path, target_date), daemon=True).start()
+
+    def process_files(self, folder_path, target_date):
+        date_for_filename = target_date.strftime("%d-%m-%Y")
+        date_label = target_date.strftime("%d.%m.%Y")
+
+        try:
+            self.run_on_main(lambda: self.progress_bar.set(0))
+
+            def _progress(i, total, fname):
+                pct = int((i / total) * 100) if total else 100
+                self.run_on_main(lambda i=i, t=total, f=fname, p=pct: [
+                    self.progress_bar.set(i / max(1, t)),
+                    self.lbl_progress_pct.configure(text=f"{p}%"),
+                    self.lbl_current_file.configure(text=f"Reading: {f}")
+                ])
+
+            records = collect_records(folder_path, target_date, _progress)
+
+            if not records:
+                self.run_on_main(self.clear_results)
+                if not self.auto_sync_enabled:
+                    self.run_on_main(lambda: messagebox.showinfo("Done", f"No receipts found for: {date_label}"))
+                return
+
+            device_unit = annotate_records(records)
+            info, units_summary = build_summary(records, device_unit, date_label)
+            
+            report_file_path = os.path.join(DOCUMENTS_DIR, f"Insurance_Report_{date_for_filename}.xlsx")
+            out_file = write_report(records, report_file_path)
+
+            self.last_generated_file = out_file
+            self.system_total_sum = info["total_sum"]
+            self.last_detailed_records = records
+            self.last_units_summary = units_summary
+            self.last_summary_info = info
+
+            def _finish():
+                self.progress_bar.set(1.0)
+                self.lbl_progress_pct.configure(text="100%")
+                last_f = records[-1]["file"] if records else "None"
+                self.lbl_current_file.configure(text=f"Done · {last_f}")
+                self.lbl_cnt.configure(text=f"{info['total_count']:,}")
+                self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+                self._render_status_bar(info['total_count'], info['total_sum'])
+                self.check_pos()
+                play_sound_matched()
+
+            self.run_on_main(_finish)
+
+        except Exception as ex:
+            log_exception("process_critical", ex)
+            err_msg = str(ex)
+            self.run_on_main(lambda: messagebox.showerror("System Error", err_msg))
+        finally:
+            self.is_processing = False
+            if self.processing_lock.locked(): self.processing_lock.release()
+            self.run_on_main(lambda: self.btn_run.configure(state="normal"))
+
+    def open_excel(self):
+        if not self.is_supervisor:
+            messagebox.showwarning("Restricted", tr("restricted_admin"))
+            return
+        if self.last_generated_file and os.path.exists(self.last_generated_file):
+            os.startfile(self.last_generated_file)
+        else:
+            messagebox.showinfo("Notice", "Run extraction first!")
+
+    def refresh_after_void_change(self):
+        recs = self.last_detailed_records
+        old = self.last_summary_info or {}
+        device_unit = annotate_records(recs)
+        info, units_summary = build_summary(recs, device_unit, old.get("date_label", ""))
+        if old.get("unit"):
+            info["unit"] = old["unit"]
+        self.last_summary_info = info
+        self.last_units_summary = units_summary
+        self.system_total_sum = info["total_sum"]
+        self.lbl_cnt.configure(text=f"{info['total_count']:,}")
+        self.lbl_sum.configure(text=f"{info['total_sum']:,.2f} {tr('currency')}")
+        self._render_status_bar(info['total_count'], info['total_sum'])
+        self.check_pos()
+        try:
+            rp = self.last_generated_file
+            if rp and os.path.exists(rp):
+                with open(rp, "ab"):
+                    pass
+                write_report(recs, rp)
+        except Exception as e:
+            log_exception("regen_report_after_void", e)
+
+    def void_selected_record(self, rec, on_done_callback=None):
+        try:
+            if rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("void_already"))
+                return
+            key = void_key(rec.get("file", "") or rec.get("path", ""))
+            if not key:
+                messagebox.showerror("Error", "Unable to detect receipt key!")
+                return
+
+            try:
+                parent = (self.focus_get() or self).winfo_toplevel()
+            except Exception:
+                parent = self
+            reason = simpledialog.askstring(tr("void_reason_title"), tr("void_reason_prompt"), parent=parent)
+            if reason is None:
+                return
+            reason = reason.strip()
+
+            add_void(key, rec["amount"], rec.get("plate", "-"), reason)
+            rec["is_void"] = True
+            rec["void_reason"] = reason
+
+            self.refresh_after_void_change()
+            if on_done_callback: on_done_callback()
+            messagebox.showinfo(tr("done"), f"Transaction voided: {rec['amount']:.2f} EGP.")
+        except Exception as e:
+            log_exception("void_record", e)
+            messagebox.showerror("Error", f"Void failed: {str(e)}")
+
+    def unvoid_selected_record(self, rec, on_done_callback=None):
+        try:
+            if not rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("restore_already"))
+                return
+            old_path = rec.get("path", "")
+            basename = os.path.basename(old_path)
+
+            if basename.startswith("_"):
+                if not old_path or not os.path.exists(old_path):
+                    messagebox.showerror("Error", "File does not exist in folder!")
+                    return
+                new_path = os.path.join(os.path.dirname(old_path), basename.lstrip("_"))
+                if os.path.exists(new_path):
+                    messagebox.showerror("Error", "A file with original name already exists.")
+                    return
+                try:
+                    os.rename(old_path, new_path)
+                except OSError as ex:
+                    messagebox.showerror("Error", f"Failed to rename file:\n{ex}")
+                    return
+                rec["path"], rec["file"] = new_path, os.path.basename(new_path)
+
+            remove_void(void_key(rec.get("file", "") or old_path))
+            rec["is_void"] = False
+            rec["void_reason"] = ""
+
+            self.refresh_after_void_change()
+            if on_done_callback: on_done_callback()
+            messagebox.showinfo(tr("done"), f"Transaction restored: {rec['amount']:.2f} EGP.")
+        except Exception as e:
+            log_exception("unvoid_record", e)
+            messagebox.showerror("Error", f"Restore failed: {str(e)}")
+
+    def _rearchive_days(self, folder, days, progress=None, stage=None):
+        """إعادة الأرشفة: كنس أي ملف لسه برا الأرشيف + إعادة قراءة إيصالات الأيام + إعادة بناء إيصال السمري وإكسيل اليوم.
+        days=None يعني كل الأيام. بترجّع قاموس النتيجة أو None لو الفهرسة مشغولة."""
+        try: self._run_archive_sweep(folder)
+        except Exception as e: log_exception("rearchive_sweep", e)
+        res = archive_reindex(folder, days, progress)
+        if res is None: return None
+        targets = sorted(days) if days is not None else archive_all_days()
+        rebuilt = 0
+        for i, iso in enumerate(targets, 1):
+            try:
+                dd = datetime.date.fromisoformat(iso)
+                f = archive_day_dir(folder, dd)
+                if not os.path.isdir(f): f = archive_day_folder_from_index(iso) or f
+                if not os.path.isdir(f): continue
+                if stage:
+                    try: stage(i, len(targets), iso)
+                    except Exception as _e: _log_silent("rearchive_days#stage", _e)
+                recs = archive_day_records(f)
+                if not recs: continue
+                tag = dd.strftime("%d-%m-%Y")
+                self._generate_day_summary_pdf(f, tag, recs)
+                new_pdf = os.path.join(f, f"Samary_{tag}.pdf")
+                if os.path.exists(new_pdf):
+                    for old in glob.glob(os.path.join(f, "Samary_*.pdf")):   # أي سمري قديم بإسم تاني كان ممكن يتفتح بالغلط
+                        if os.path.normcase(old) != os.path.normcase(new_pdf):
+                            try: os.remove(old)
+                            except Exception as _e: _log_silent("rearchive_days#rm_old", _e)
+                archive_write_day_excel(f, dd)
+                rebuilt += 1
+            except Exception as e:
+                log_exception(f"rearchive_day:{iso}", e)
+        res["rebuilt"] = rebuilt
+        res["days"] = len(targets)
+        self._start_archive_maintenance(folder)   # نسخة احتياطية للأرشيف بعد التحديث
+        return res
+
+    def _start_archive_maintenance(self, folder):
+        """فهرسة + نسخ احتياطي مخفي في الخلفية (بدون تعطيل الواجهة)."""
+        try:
+            if folder and os.path.isdir(folder):
+                threading.Thread(target=archive_maintenance, args=(folder,), daemon=True).start()
+        except Exception as e:
+            log_exception("start_archive_maintenance", e)
+
+    def open_records_viewer(self):
+        if not self.last_detailed_records:
+            messagebox.showinfo("Notice", tr("no_records_yet"))
+            return
+        self._records_window(self.last_detailed_records, live=True)
+
+    def reopen_summary_modal(self):
+        if not self.last_summary_info:
+            messagebox.showinfo("Notice", tr("no_summary_yet"))
+            return
+        info = self.last_summary_info
+        self.show_custom_summary(info["unit"], info["total_sum"], info["total_count"],
+                                 info["pdf_count"], info["manual_count"], info["date_label"], info["duplicates"],
+                                 info.get("wrong_count", 0), info.get("missing_count", 0))
+
+    def _refresh_archive_day_summary(self, day_iso):
+        """لو اليوم ده متأرشف بالفعل، بيعيد عمل إيصال السمري بتاعه في الأرشيف عشان تظهر فيه الوحدة المختارة."""
+        try:
+            dd = datetime.date.fromisoformat(day_iso)
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            day_dir = archive_day_dir(folder, dd)
+        except Exception as e:
+            log_exception("refresh_archive_day_summary#1", e)
+            return
+        if not os.path.isdir(day_dir): return
+        def work():
+            try:
+                recs = archive_day_records(day_dir)
+                if recs: self._generate_day_summary_pdf(day_dir, dd.strftime("%d-%m-%Y"), recs)
+            except Exception as e:
+                log_exception("refresh_archive_day_summary", e)
+        threading.Thread(target=work, daemon=True).start()
+
+    def export_pdf_summary(self, parent=None):
+        if not REPORTLAB_AVAILABLE:
+            messagebox.showerror("Error", "ReportLab library required for PDF generation.")
+            return
+        if not self.last_summary_info or not self.last_generated_file:
+            messagebox.showinfo("Notice", "No records available yet. Run extraction first!")
+            return
+
+        sel = self.ask_summary_unit(parent)          # اختيار الوحدة إجباري قبل عمل الإيصال
+        if not sel: return
+        chosen_unit, chosen_tid = sel
+        day_iso = _day_iso_from_label((self.last_summary_info or {}).get("date_label", ""))
+        if day_iso:
+            summary_unit_save(day_iso, chosen_unit, chosen_tid)
+            self._refresh_archive_day_summary(day_iso)
+
+        pdf_path = os.path.splitext(self.last_generated_file)[0] + "_Summary.pdf"
+        try:
+            info = self.last_summary_info
+            build_summary_pdf_file(info, pdf_path, chosen_unit, chosen_tid)   # v96: نفس الرسم الموحّد
+
+            os.startfile(pdf_path)
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+import sys as _a2r_sys
+core = ui = _a2r_sys.modules[__name__]   # ملف واحد: core و ui هما نفس الملف
+
+# ======================================================================
+# الواجهة (Qt): ثيمات وأدوات
+# ======================================================================
+# -*- coding: utf-8 -*-
+"""A2R POS Console — طبقة Qt (PySide6): ثيمين (فاتح/غامق) + أيقونات SVG + عناصر بنفس واجهة Tk
+(configure / get / set / insert / delete / select ...) عشان دوال الكونسول المنقولة حرف بحرف تشتغل زي ما هي."""
+import re
+import threading
+import weakref
+
+from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, QEvent, QObject, Signal
+from PySide6.QtGui import (QIcon, QPixmap, QPainter, QColor, QFont, QKeySequence, QShortcut, QAction,
+                           QGuiApplication)
+from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox,
+                               QProgressBar, QFrame, QHBoxLayout, QVBoxLayout, QMessageBox, QFileDialog,
+                               QInputDialog, QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView,
+                               QMenu, QSizePolicy, QStyle)
+
+
+FONT_FAMILIES = ["Segoe UI", "Noto Sans Arabic", "Noto Sans", "Tahoma", "Arial"]
+
+# ───────────────────────── الثيمين ─────────────────────────
+# option-1 (أبيض/أزرق) و option-2 (أسود/ليموني) من الموكاب v2
+PAL = {
+    "light": dict(bg="#F3F4F6", card="#FFFFFF", sub="#FFFFFF", border="#E5E7EB", text="#1F2937", muted="#6B7280",
+                  acc="#2563EB", acc_hover="#1D4ED8", acc_soft="#EFF6FF", on_acc="#FFFFFF", hero="#2563EB",
+                  hero_text="#FFFFFF", hero_muted="#DBEAFE", input="#F9FAFB", ok="#047857", ok_soft="#ECFDF5",
+                  warn="#B45309", warn_soft="#FFFBEB", bad="#B91C1C", bad_soft="#FEF2F2", man="#1D4ED8",
+                  man_soft="#EFF6FF", track="#E5E7EB", fill="#10B981", sel="#DBEAFE", sel_text="#1E3A8A",
+                  link="#2563EB", hover="#F3F4F6"),
+    "dark": dict(bg="#0B0F14", card="#121A23", sub="#0F151C", border="#1C2530", text="#E6EDF3", muted="#8B98A5",
+                 acc="#C6F432", acc_hover="#B4E21F", acc_soft="#1A232E", on_acc="#0B0F14", hero="#121A23",
+                 hero_text="#FFFFFF", hero_muted="#8B98A5", input="#0F151C", ok="#C6F432", ok_soft="#1A2A10",
+                 warn="#F59E0B", warn_soft="#2A2010", bad="#F43F5E", bad_soft="#2A1218", man="#38BDF8",
+                 man_soft="#0F2230", track="#1C2530", fill="#C6F432", sel="#26331A", sel_text="#E6EDF3",
+                 link="#C6F432", hover="#17212C"),
+}
+THEME_LABELS = {"light": ("فاتح", "Light"), "dark": ("غامق", "Dark")}
+
+
+def theme_from_config(saved):
+    """الكونفج القديم كان فيه اسم ثيم من الـ 11: الفاتحة → light وأي حاجة تانية (أو مفيش) → dark."""
+    if saved in ("light", "dark"):
+        return saved
+    t = core.THEMES.get(saved) if saved else None
+    if t and str(t.get("mode", "")).lower() == "light":
+        return "light"
+    return "dark"
+
+
+def register_core_themes():
+    """بنضيف 'light' و'dark' لقاموس THEMES بتاع الكونسول بنفس المفاتيح اللي الدوال المنقولة بتقراها
+    (success / danger / warning / text_muted / mode ...) — الـ 11 ثيم القديمة بتفضل زي ما هي (مش ظاهرة)."""
+    for key, p in PAL.items():
+        core.THEMES[key] = {
+            "mode": "Light" if key == "light" else "Dark",
+            "bg": p["bg"], "card": p["card"], "sub_card": p["sub"], "border": p["border"], "input": p["input"],
+            "text": p["text"], "text_muted": p["muted"], "primary": p["acc"], "primary_hover": p["acc_hover"],
+            "success": p["ok"], "danger": p["bad"], "warning": p["warn"], "accent": p["acc"],
+            "secondary": p["card"], "secondary_hover": p["hover"], "success_btn": p["card"],
+            "success_btn_hover": p["hover"], "tool": p["card"], "tool_hover": p["hover"], "warn_btn": p["card"],
+            "warn_btn_hover": p["hover"], "danger_btn": p["bad"], "danger_btn_hover": p["bad"],
+        }
+
+
+def _arrow_file(color):
+    """سهم القايمة المنسدلة (SVG) في فولدر مؤقت — QSS بيحتاج مسار ملف."""
+    import os, tempfile
+    d = os.path.join(tempfile.gettempdir(), "a2r_pos_console_ui")
+    os.makedirs(d, exist_ok=True)
+    fp = os.path.join(d, "arrow_" + color.strip("#") + ".svg")
+    if not os.path.exists(fp):
+        with open(fp, "w", encoding="utf-8") as f:
+            f.write('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+                    f'<path d="M1.5 3.5L5 7l3.5-3.5" fill="none" stroke="{color}" stroke-width="1.6" '
+                    'stroke-linecap="round" stroke-linejoin="round"/></svg>')
+    return fp.replace("\\", "/")
+
+
+def build_qss(key):
+    p = PAL[key]
+    return f"""
+QWidget#Root, QWidget#Win {{ background: {p['bg']}; color: {p['text']}; }}
+QLabel {{ color: {p['text']}; background: transparent; }}
+QLabel[muted="true"] {{ color: {p['muted']}; }}
+QToolTip {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
+QFrame#Header {{ background: {p['sub']}; border: none; border-bottom: 1px solid {p['border']}; }}
+QFrame#Card {{ background: {p['card']}; border: 1px solid {p['border']}; border-radius: 12px; }}
+QFrame#Hero {{ background: {p['hero']}; border: {'none' if key == 'light' else '1px solid ' + p['border']}; border-radius: 12px; }}
+QFrame#Pill {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 8px; }}
+QFrame#VSep {{ background: {p['border']}; max-width: 1px; min-width: 1px; border: none; }}
+QFrame#HSep {{ background: {p['border']}; max-height: 1px; min-height: 1px; border: none; }}
+QFrame#Role {{ border-radius: 11px; border: 1px solid {p['bad']}; background: {p['bad_soft']}; }}
+QPushButton {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 8px;
+               padding: 0 10px; min-height: 26px; font-weight: 700; }}
+QPushButton:hover {{ background: {p['hover']}; }}
+QPushButton:focus {{ border: 1px solid {p['acc']}; }}
+QPushButton:disabled {{ color: {p['muted']}; background: {p['input']}; border: 1px solid {p['border']}; }}
+QPushButton[role="primary"] {{ background: {p['acc']}; color: {p['on_acc']}; border: none; }}
+QPushButton[role="primary"]:hover {{ background: {p['acc_hover']}; }}
+QPushButton[role="primary"]:disabled {{ background: {p['track']}; color: {p['muted']}; }}
+QPushButton[role="soft"] {{ background: {p['acc_soft']}; color: {p['acc'] if key == 'light' else p['text']}; }}
+QPushButton[role="danger"] {{ background: transparent; color: {p['bad']}; border: 1px solid {p['bad']}; }}
+QPushButton[role="danger"]:hover {{ background: {p['bad_soft']}; }}
+QPushButton[role="dangerfill"] {{ background: {p['bad']}; color: #FFFFFF; border: none; }}
+QPushButton[role="pill"] {{ background: {p['input']}; min-height: 24px; padding: 0 8px; font-weight: 600; }}
+QPushButton[role="link"] {{ background: transparent; border: none; color: {p['link']}; padding: 0 2px; min-height: 16px; font-weight: 700; }}
+QPushButton[role="link"]:hover {{ text-decoration: underline; }}
+QPushButton[big="true"] {{ min-height: 32px; border-radius: 10px; font-size: 10pt; }}
+QLineEdit, QComboBox {{ background: {p['input']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 8px;
+                        padding: 0 8px; min-height: 26px; selection-background-color: {p['acc']}; selection-color: {p['on_acc']}; font-weight: 600; }}
+QLineEdit:focus, QComboBox:focus {{ border: 1px solid {p['acc']}; }}
+QLineEdit:disabled, QComboBox:disabled {{ color: {p['muted']}; }}
+QComboBox::drop-down {{ border: none; width: 18px; }}
+QComboBox::down-arrow {{ image: url({_arrow_file(p['muted'])}); width: 10px; height: 10px; margin: 0 4px; }}
+QComboBox QAbstractItemView {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']};
+                               selection-background-color: {p['sel']}; selection-color: {p['sel_text']}; outline: 0; }}
+QCheckBox {{ color: {p['text']}; font-weight: 700; spacing: 6px; }}
+QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid {p['border']}; background: {p['input']}; }}
+QCheckBox::indicator:checked {{ background: {p['acc']}; border: 1px solid {p['acc']}; }}
+QProgressBar {{ background: {p['track']}; border: none; border-radius: 3px; max-height: 6px; min-height: 6px; }}
+QProgressBar::chunk {{ background: {p['fill']}; border-radius: 3px; }}
+QTreeWidget, QListView {{ background: {p['card']}; color: {p['text']}; border: none; outline: 0;
+                          selection-background-color: {p['sel']}; selection-color: {p['sel_text']}; }}
+QTreeWidget::item {{ min-height: 26px; }}
+QTreeWidget::item:selected {{ background: {p['sel']}; color: {p['sel_text']}; }}
+QHeaderView::section {{ background: {p['sub']}; color: {p['muted']}; border: none; border-bottom: 1px solid {p['border']};
+                        padding: 4px 6px; font-weight: 800; }}
+QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
+QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 4px; min-height: 24px; }}
+QScrollBar::handle:vertical:hover {{ background: {p['muted']}; }}
+QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: {p['border']}; border-radius: 4px; min-width: 24px; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
+QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
+QTabWidget::pane {{ border: none; }}
+QTabBar::tab {{ background: {p['card']}; color: {p['muted']}; border: 1px solid {p['border']}; padding: 6px 14px; margin: 0 2px;
+                border-radius: 8px; font-weight: 700; }}
+QTabBar::tab:selected {{ background: {p['acc']}; color: {p['on_acc']}; border: 1px solid {p['acc']}; }}
+QSplitter::handle {{ background: {p['border']}; width: 6px; }}
+QMenu {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
+QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
+QMenu::item:selected {{ background: {p['sel']}; color: {p['sel_text']}; }}
+QMenu::separator {{ height: 1px; background: {p['border']}; margin: 4px 6px; }}
+QRadioButton {{ color: {p['text']}; font-weight: 700; }}
+QMessageBox, QInputDialog {{ background: {p['bg']}; }}
+"""
+
+
+class ThemeState:
+    key = "dark"
+
+    @classmethod
+    def p(cls):
+        return PAL[cls.key]
+
+
+# ───────────────────────── الأيقونات (SVG outline) ─────────────────────────
+ICON_PATHS = dict(
+    plus="M12 5v14M5 12h14", chart="M4 20V10M10 20V4M16 20v-7M22 20H2",
+    cash="M3 7h18v10H3zM12 9.5a2.5 2.5 0 1 0 0 5a2.5 2.5 0 0 0 0-5",
+    box="M3 7h18v4H3zM5 11v9h14v-9M10 15h4", reset="M3 12a9 9 0 1 0 3-6.7M3 4v5h5",
+    list="M8 6h13M8 12h13M8 18h13M3 6h1M3 12h1M3 18h1", books="M4 4h5v16H4zM10 4h4v16h-4zM15 5l4-1l3 15l-4 1z",
+    globe="M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18",
+    pdf="M6 3h9l4 4v14H6zM14 3v5h5M9 14h6M9 17h4", xls="M5 3h10l4 4v14H5zM8 11l6 6M14 11l-6 6",
+    printer="M6 9V3h12v6M6 18H4v-7h16v7h-2M8 14h8v7H8z", bolt="M13 2L4 14h7l-1 8l9-12h-7z",
+    folder="M3 6h6l2 2h10v11H3z", gear="M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1",
+    sound="M4 9h4l5-4v14l-5-4H4zM16 9a4 4 0 0 1 0 6", mute="M4 9h4l5-4v14l-5-4H4zM17 9l5 6M22 9l-5 6",
+    mini="M4 14h6v6M20 10h-6V4M14 10l7-7M3 21l7-7", screen="M3 4h18v12H3zM8 20h8M12 16v4",
+    eye="M2 12s4-7 10-7s10 7 10 7s-4 7-10 7S2 12 2 12M12 9a3 3 0 1 0 0 6a3 3 0 0 0 0-6",
+    eyeoff="M3 3l18 18M10.6 6.1A10 10 0 0 1 12 6c6 0 10 6 10 6a17 17 0 0 1-3.2 3.8M6.6 6.6C3.9 8.4 2 12 2 12s4 7 10 7a9.7 9.7 0 0 0 5.4-1.6M9.9 9.9a3 3 0 0 0 4.2 4.2",
+    lock="M6 11h12v10H6zM8 11V7a4 4 0 0 1 8 0v4", cal="M4 5h16v16H4zM4 10h16M9 3v4M15 3v4",
+    search="M11 4a7 7 0 1 0 0 14a7 7 0 0 0 0-14M20 20l-4-4", x="M6 6l12 12M18 6L6 18",
+    undo="M9 14L4 9l5-5M4 9h11a5 5 0 0 1 0 10h-3", xcircle="M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18M9 9l6 6M15 9l-6 6",
+    hourglass="M6 3h12M6 21h12M7 3v3l5 6l-5 6v3M17 3v3l-5 6l5 6v3", alert="M12 3L2 21h20zM12 10v5M12 18v.5",
+    check="M5 12l5 5L20 7", play="M7 4l13 8l-13 8z", building="M4 21V5l8-3v19M12 9h8v12M7 8h2M7 12h2M7 16h2M15 13h2M15 17h2",
+    puzzle="M10 3h4v3a2 2 0 1 0 4 0V3h3v7h-3a2 2 0 1 0 0 4h3v7h-7v-3a2 2 0 1 0-4 0v3H3v-7h3a2 2 0 1 0 0-4H3V3z",
+    expand="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", maximize="M4 4h16v16H4zM4 9h16",
+    arrowl="M19 12H5M11 6l-6 6l6 6", arrowr="M5 12h14M13 6l6 6l-6 6", archive="M3 4h18v4H3zM5 8v12h14V8M10 12h4",
+)
+EMOJI_ICON = {
+    "🌐": "globe", "⚡": "bolt", "➕": "plus", "📊": "chart", "🖨": "printer", "📚": "books", "🔍": "search",
+    "🔎": "search", "📄": "pdf", "💵": "cash", "📦": "box", "❌": "xcircle", "↩": "undo", "🖥": "screen",
+    "🔒": "lock", "⚙": "gear", "🔄": "reset", "🗖": "maximize", "♻": "reset", "📂": "folder", "📁": "folder",
+    "🗄": "archive", "🧩": "puzzle", "⛶": "expand", "✖": "x", "📅": "cal", "👈": "arrowl", "⏳": "hourglass",
+    "⚠": "alert", "✅": "check", "🏢": "building", "📋": "list", "▶": "play", "👁": "eye", "🙈": "eyeoff",
+    "🔇": "mute", "🔊": "sound", "📈": "chart",
+}
+_EMOJI_RE = re.compile(r"^\s*([\U0001F000-\U0001FAFF\u2190-\u21FF\u2300-\u23FF\u2600-\u27BF\u2B00-\u2BFF])[\uFE0F\u200D]*\s*")
+
+
+def split_icon(text):
+    """'🖨️ إعادة طباعة' → ('printer', 'إعادة طباعة'). النص نفسه مبيتغيرش؛ الإيموجي بس بيتحول لأيقونة."""
+    if not isinstance(text, str):
+        return None, text
+    m = _EMOJI_RE.match(text)
+    if m and m.group(1) in EMOJI_ICON:
+        return EMOJI_ICON[m.group(1)], text[m.end():]
+    return None, text
+
+
+def strip_emoji_title(text):
+    return split_icon(text)[1]
+
+
+_ICON_CACHE = {}
+
+
+def make_icon(name, color, size=16, disabled_color=None):
+    key = (name, color, size, disabled_color)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    icon = QIcon()
+    for col, mode in ((color, QIcon.Normal), (disabled_color, QIcon.Disabled)):
+        if not col:
+            continue
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" '
+               f'stroke="{col}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">'
+               f'<path d="{ICON_PATHS[name]}"/></svg>')
+        r = QSvgRenderer(QByteArray(svg.encode()))
+        for scale in (1, 2):
+            pm = QPixmap(size * scale, size * scale)
+            pm.fill(Qt.transparent)
+            pa = QPainter(pm)
+            pa.setRenderHint(QPainter.Antialiasing)
+            r.render(pa)
+            pa.end()
+            pm.setDevicePixelRatio(scale)
+            icon.addPixmap(pm, mode)
+    _ICON_CACHE[key] = icon
+    return icon
+
+
+# ───────────────────────── نداءات Tk → Qt ─────────────────────────
+class _Ev:
+    """حدث وهمي بيتبعت للدوال اللي مستنية event (زي lambda e: ...)."""
+    def __init__(self, widget=None, x=0, y=0):
+        self.widget = widget
+        self.x = self.y = 0
+        self.x_root, self.y_root = x, y
+
+
+def _fg_color(widget_role):
+    p = ThemeState.p()
+    return {"primary": p["on_acc"], "danger": p["bad"], "dangerfill": "#FFFFFF", "link": p["link"],
+            "soft": p["acc"] if ThemeState.key == "light" else p["text"]}.get(widget_role, p["text"])
+
+
+_ALL_BUTTONS = weakref.WeakSet()
+_ALL_LABELS = weakref.WeakSet()
+
+
+class TkCompat:
+    """pack / pack_forget / winfo_exists / lift / focus_force / destroy / bind زي Tk."""
+    _tk_destroyed = False
+
+    def pack(self, *a, **k):
+        self.setVisible(True)
+
+    grid = pack
+
+    def pack_forget(self):
+        self.setVisible(False)
+
+    grid_forget = pack_forget
+
+    def winfo_exists(self):
+        return not self._tk_destroyed
+
+    def winfo_toplevel(self):
+        return self.window()
+
+    def lift(self):
+        w = self.window()
+        w.raise_()
+        w.activateWindow()
+
+    def focus_force(self):
+        self.lift()
+        self.setFocus()
+
+    def focus_set(self):
+        self.setFocus()
+
+    def destroy(self):
+        self._tk_destroyed = True
+        self.deleteLater()
+
+    def config(self, **kw):
+        return self.configure(**kw)
+
+
+class Label(QWidget, TkCompat):
+    """Label بأيقونة: لو النص بيبدأ بإيموجي معروف بيتحول لأيقونة SVG بنفس لون النص."""
+    def __init__(self, text="", parent=None, size=None, bold=True, color_key="text", wrap=False, align=None,
+                 icon=None, mono=False):
+        super().__init__(parent)
+        self._color = None
+        self._color_key = color_key
+        self._fixed_icon = icon
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(5)
+        self.ic = QLabel(self)
+        self.ic.setFixedSize(14, 14)
+        self.ic.hide()
+        self.lbl = QLabel(self)
+        self.lbl.setTextFormat(Qt.PlainText)
+        if wrap:
+            self.lbl.setWordWrap(True)
+        f = self.lbl.font()
+        if size:
+            f.setPointSizeF(size)
+        f.setBold(bold)
+        self.lbl.setFont(f)
+        lay.addWidget(self.ic, 0, Qt.AlignVCenter)
+        lay.addWidget(self.lbl, 1)
+        if align is not None:
+            self.lbl.setAlignment(align)
+        self._icon_name = None
+        self._text = ""
+        _ALL_LABELS.add(self)
+        self.configure(text=text)
+
+    def setAlignment(self, a):
+        self.lbl.setAlignment(a)
+
+    def configure(self, **kw):
+        if "text" in kw:
+            raw = kw["text"]
+            name, txt = split_icon(raw)
+            self._text = raw
+            self._icon_name = self._fixed_icon or name
+            self.lbl.setText(txt)
+        if "text_color" in kw and kw["text_color"]:
+            self._color = kw["text_color"]
+            self._color_key = None
+        if "font" in kw and kw["font"]:
+            fnt = kw["font"]
+            f = self.lbl.font()
+            f.setPointSizeF(fnt[1] * 0.75 + 1)
+            f.setBold("bold" in fnt)
+            self.lbl.setFont(f)
+        self._restyle()
+
+    def set_color_key(self, key):
+        self._color_key = key
+        self._color = None
+        self._restyle()
+
+    def color(self):
+        return self._color or ThemeState.p().get(self._color_key or "text", ThemeState.p()["text"])
+
+    def _restyle(self):
+        c = self.color()
+        self.lbl.setStyleSheet(f"color: {c}; background: transparent;")
+        if self._icon_name:
+            self.ic.setPixmap(make_icon(self._icon_name, c, 14).pixmap(14, 14))
+            self.ic.show()
+        else:
+            self.ic.hide()
+
+    def cget(self, k):
+        return self._text if k == "text" else None
+
+    def text(self):
+        return self.lbl.text()
+
+
+class Button(QPushButton, TkCompat):
+    def __init__(self, text="", parent=None, command=None, role=None, icon=None, big=False, tip=None):
+        super().__init__(parent)
+        self._command = command
+        self._role = role or ""
+        self._fixed_icon = icon
+        self._icon_name = None
+        self._raw = ""
+        if role:
+            self.setProperty("role", role)
+        if big:
+            self.setProperty("big", "true")
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.clicked.connect(self._fire)
+        self.setIconSize(QSize(14, 14))
+        _ALL_BUTTONS.add(self)
+        self.configure(text=text)
+        if tip:
+            self.setToolTip(tip)
+
+    def _fire(self):
+        if self._command:
+            self._command()
+
+    def set_role(self, role):
+        self._role = role
+        self.setProperty("role", role)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.refresh_icon()
+
+    def refresh_icon(self):
+        name = self._icon_name
+        if name:
+            self.setIcon(make_icon(name, _fg_color(self._role), 14, ThemeState.p()["muted"]))
+        else:
+            self.setIcon(QIcon())
+
+    def configure(self, **kw):
+        if "text" in kw:
+            raw = kw["text"]
+            self._raw = raw
+            name, txt = split_icon(raw)
+            self._icon_name = self._fixed_icon or name
+            self.setText(txt)
+            self.refresh_icon()
+        if "state" in kw:
+            self.setEnabled(kw["state"] != "disabled")
+        if "command" in kw:
+            self._command = kw["command"]
+
+    def cget(self, k):
+        if k == "state":
+            return "normal" if self.isEnabled() else "disabled"
+        if k == "text":
+            return self._raw
+        return None
+
+    def invoke(self):
+        self._fire()
+
+
+class Entry(QLineEdit, TkCompat):
+    def __init__(self, parent=None, placeholder="", justify=None, show=None):
+        super().__init__(parent)
+        if placeholder:
+            self.setPlaceholderText(placeholder)
+        if justify == "center":
+            self.setAlignment(Qt.AlignCenter)
+        if show:
+            self.setEchoMode(QLineEdit.Password)
+        self._focus_out = []
+
+    def get(self):
+        return self.text()
+
+    def delete(self, first, last=None):
+        t = self.text()
+        if last in ("end", None) and first in (0, "0"):
+            self.setText("") if last == "end" else self.setText(t[1:])
+            return
+        a = int(first)
+        b = len(t) if last == "end" else (a + 1 if last is None else int(last))
+        self.setText(t[:a] + t[b:])
+
+    def insert(self, index, s):
+        t = self.text()
+        i = len(t) if index == "end" else int(index)
+        self.setText(t[:i] + str(s) + t[i:])
+
+    def configure(self, **kw):
+        if "state" in kw:
+            self.setEnabled(kw["state"] != "disabled")
+        if "placeholder_text" in kw:
+            self.setPlaceholderText(kw["placeholder_text"])
+        if "show" in kw:
+            self.setEchoMode(QLineEdit.Password if kw["show"] else QLineEdit.Normal)
+
+    def bind(self, seq, fn, add=None):
+        if seq == "<Return>":
+            self.returnPressed.connect(lambda: fn(_Ev(self)))
+        elif seq == "<KeyRelease>":
+            self.textEdited.connect(lambda _t: fn(_Ev(self)))
+        elif seq == "<FocusOut>":
+            self._focus_out.append(fn)
+
+    def focusOutEvent(self, e):
+        super().focusOutEvent(e)
+        for fn in self._focus_out:
+            try:
+                fn(_Ev(self))
+            except Exception as ex:
+                core._log_silent("entry_focus_out", ex)
+
+
+class Combo(QComboBox, TkCompat):
+    """CTkComboBox: get / set / configure(values=, state=, command=). readonly = اختيار من القايمة بس."""
+    def __init__(self, parent=None, values=(), readonly=False, command=None, center=False):
+        super().__init__(parent)
+        self.setEditable(True)
+        self._readonly = readonly
+        self._command = command
+        self.setInsertPolicy(QComboBox.NoInsert)
+        self.lineEdit().setReadOnly(readonly)
+        if center:
+            self.lineEdit().setAlignment(Qt.AlignCenter)
+            self.lineEdit().setTextMargins(0, 0, 0, 0)
+            self.setStyleSheet("QComboBox { padding: 0 1px; } QComboBox::drop-down { width: 13px; }"
+                               "QComboBox::down-arrow { margin: 0 2px; }")
+        if readonly:
+            self.lineEdit().installEventFilter(self)
+            self.lineEdit().setCursor(Qt.PointingHandCursor)
+        self.setMaxVisibleItems(14)
+        self.configure(values=list(values))
+        self.textActivated.connect(self._activated)
+        self._key_release = []
+        self.lineEdit().textEdited.connect(lambda _t: [f(_Ev(self)) for f in self._key_release])
+        self._return = []
+        self.lineEdit().returnPressed.connect(lambda: [f(_Ev(self)) for f in self._return])
+
+    def eventFilter(self, obj, ev):
+        if obj is self.lineEdit() and ev.type() == QEvent.MouseButtonPress and self.isEnabled():
+            self.showPopup()
+            return True
+        return super().eventFilter(obj, ev)
+
+    def _activated(self, txt):
+        if self._command:
+            self._command(txt)
+
+    def get(self):
+        return self.currentText()
+
+    def set(self, v):
+        v = "" if v is None else str(v)
+        i = self.findText(v)
+        if i >= 0:
+            self.setCurrentIndex(i)
+        self.setEditText(v)
+
+    def configure(self, **kw):
+        if "values" in kw:
+            cur = self.currentText()
+            self.blockSignals(True)
+            self.clear()
+            self.addItems([str(x) for x in kw["values"]])
+            self.setEditText(cur)
+            self.blockSignals(False)
+        if "state" in kw:
+            st = kw["state"]
+            self.setEnabled(st != "disabled")
+            if st == "readonly":
+                self.lineEdit().setReadOnly(True)
+        if "command" in kw:
+            self._command = kw["command"]
+
+    def bind(self, seq, fn, add=None):
+        if seq == "<KeyRelease>":
+            self._key_release.append(fn)
+        elif seq == "<Return>":
+            self._return.append(fn)
+
+
+class Switch(QCheckBox, TkCompat):
+    """CTkSwitch: get() → 1/0، select()/deselect() من غير ما ينادي الأمر (زي Tk)."""
+    def __init__(self, parent=None, command=None):
+        super().__init__(parent)
+        self._command = command
+        self.setCursor(Qt.PointingHandCursor)
+        self.toggled.connect(self._fire)
+        self.setFixedSize(34, 20)
+
+    def _fire(self, _v):
+        if self._command:
+            self._command()
+
+    def get(self):
+        return 1 if self.isChecked() else 0
+
+    def select(self):
+        self.blockSignals(True)
+        self.setChecked(True)
+        self.blockSignals(False)
+        self.update()
+
+    def deselect(self):
+        self.blockSignals(True)
+        self.setChecked(False)
+        self.blockSignals(False)
+        self.update()
+
+    def configure(self, **kw):
+        if "command" in kw:
+            self._command = kw["command"]
+
+    def paintEvent(self, e):
+        p = ThemeState.p()
+        pa = QPainter(self)
+        pa.setRenderHint(QPainter.Antialiasing)
+        on = self.isChecked()
+        pa.setPen(Qt.NoPen)
+        pa.setBrush(QColor(p["fill"] if on else p["track"]))
+        r = self.rect().adjusted(1, 2, -1, -2)
+        pa.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        knob = r.height() - 4
+        x = r.right() - knob - 2 if on else r.left() + 2
+        if self.layoutDirection() == Qt.RightToLeft:
+            x = r.left() + 2 if on else r.right() - knob - 2
+        pa.setBrush(QColor("#FFFFFF" if (ThemeState.key == "light" or not on) else "#0B0F14"))
+        pa.drawEllipse(x, r.top() + 2, knob, knob)
+        pa.end()
+
+
+class Progress(QProgressBar, TkCompat):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setRange(0, 1000)
+        self.setTextVisible(False)
+        self._v = 0.0
+
+    def set(self, v):
+        try:
+            self._v = max(0.0, min(1.0, float(v)))
+        except Exception:
+            self._v = 0.0
+        self.setValue(int(self._v * 1000))
+
+    def get(self):
+        return self._v
+
+    def configure(self, **kw):
+        pass
+
+
+class Card(QFrame, TkCompat):
+    def __init__(self, parent=None, name="Card"):
+        super().__init__(parent)
+        self.setObjectName(name)
+
+    def configure(self, **kw):
+        pass
+
+
+class RoleBadge(QFrame, TkCompat):
+    """f_role_btn: configure(border_color=) — اللون الأحمر للمشرف والأخضر لليوزر (نفس ألوان الكونسول)."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("Role")
+        self._border = None
+
+    def configure(self, **kw):
+        if kw.get("border_color"):
+            self._border = kw["border_color"]
+        self.restyle()
+
+    def restyle(self):
+        if self._border:
+            c = QColor(self._border)
+            soft = f"rgba({c.red()},{c.green()},{c.blue()},{0.10 if ThemeState.key == 'light' else 0.16})"
+            self.setStyleSheet(f"QFrame#Role {{ border: 1px solid {self._border}; background: {soft}; border-radius: 11px; }}")
+
+
+# ───────────────────────── messagebox / filedialog / simpledialog ─────────────────────────
+def _parent_widget(parent):
+    if isinstance(parent, QWidget) and not getattr(parent, "_tk_destroyed", False):
+        try:
+            if parent.isVisible():
+                return parent
+        except RuntimeError:
+            pass
+    w = QApplication.activeWindow()
+    if w is not None:
+        return w
+    return getattr(core, "_A2R_MAIN", None)
+
+
+def _rtl():
+    return core.CURRENT_LANG == "ar"
+
+
+def _mbox(icon, title, msg, parent=None, buttons=QMessageBox.Ok, default=None):
+    box = QMessageBox(_parent_widget(parent))
+    box.setIcon(icon)
+    box.setWindowTitle(strip_emoji_title(str(title)))
+    box.setText(str(msg))
+    box.setStandardButtons(buttons)
+    box.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+    if buttons & QMessageBox.Yes:
+        box.button(QMessageBox.Yes).setText(core.T2("نعم", "Yes"))
+        box.button(QMessageBox.No).setText(core.T2("لا", "No"))
+    if buttons & QMessageBox.Ok:
+        box.button(QMessageBox.Ok).setText(core.T2("حسنًا", "OK"))
+    if default is not None:
+        box.setDefaultButton(default)
+    box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+    return box.exec()
+
+
+class messagebox:
+    @staticmethod
+    def showinfo(title="", message="", parent=None, **kw):
+        _mbox(QMessageBox.Information, title, message, parent)
+        return "ok"
+
+    @staticmethod
+    def showwarning(title="", message="", parent=None, **kw):
+        _mbox(QMessageBox.Warning, title, message, parent)
+        return "ok"
+
+    @staticmethod
+    def showerror(title="", message="", parent=None, **kw):
+        _mbox(QMessageBox.Critical, title, message, parent)
+        return "ok"
+
+    @staticmethod
+    def askyesno(title="", message="", parent=None, icon=None, default=None, **kw):
+        r = _mbox(QMessageBox.Warning if icon == "warning" else QMessageBox.Question, title, message, parent,
+                  QMessageBox.Yes | QMessageBox.No, QMessageBox.No if default == "no" else QMessageBox.Yes)
+        return r == QMessageBox.Yes
+
+
+class filedialog:
+    @staticmethod
+    def askdirectory(initialdir="", parent=None, **kw):
+        return QFileDialog.getExistingDirectory(_parent_widget(parent), "", initialdir or "") or ""
+
+
+class simpledialog:
+    @staticmethod
+    def askstring(title="", prompt="", parent=None, **kw):
+        dlg = QInputDialog(_parent_widget(parent))
+        dlg.setWindowTitle(strip_emoji_title(str(title)))
+        dlg.setLabelText(str(prompt))
+        dlg.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+        dlg.setOkButtonText(core.T2("حسنًا", "OK"))
+        dlg.setCancelButtonText(core.T2("إلغاء", "Cancel"))
+        dlg.setMinimumWidth(320)
+        if dlg.exec():
+            return dlg.textValue()
+        return None
+
+
+def install_dialog_shims():
+    core.messagebox = messagebox
+    core.filedialog = filedialog
+    core.simpledialog = simpledialog
+
+
+# ───────────────────────── نافذة فرعية بنفس واجهة Tk ─────────────────────────
+class Window(QWidget, TkCompat):
+    """نافذة فرعية (زي CTkToplevel): title / after / bind / destroy / winfo_exists / protocol ...
+    Esc بيقفلها (زي _on_global_escape في الكونسول) إلا لو النافذة ليها Esc خاص."""
+    def __init__(self, parent=None, title="", modal=False, resizable=False):
+        super().__init__(parent, Qt.Window | (Qt.Dialog if modal else Qt.Window))
+        self.setObjectName("Win")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+        if title:
+            self.title(title)
+        if modal:
+            self.setWindowModality(Qt.ApplicationModal)
+        self._resizable = resizable
+        self._on_close = None
+        self._binds = {}
+        self._esc = QShortcut(QKeySequence(Qt.Key_Escape), self)
+        self._esc.activated.connect(self._escape)
+        self.destroyed.connect(lambda *_: setattr(self, "_tk_destroyed", True))
+        main = getattr(core, "_A2R_MAIN", None)
+        if main is not None:
+            try:
+                self.setWindowIcon(main.windowIcon())
+            except Exception:
+                pass
+
+    def title(self, t):
+        self.setWindowTitle(strip_emoji_title(t))
+
+    def _escape(self):
+        fn = self._binds.get("<Escape>")
+        if fn:
+            fn(_Ev(self))
+        else:
+            self.close()
+
+    def bind(self, seq, fn, add=None):
+        if seq == "<Escape>":
+            self._binds[seq] = fn
+            return
+        keys = {"<Return>": [Qt.Key_Return, Qt.Key_Enter], "<F11>": [Qt.Key_F11],
+                "<Control-f>": [QKeySequence("Ctrl+F")]}
+        for k in keys.get(seq, []):
+            sc = QShortcut(QKeySequence(k) if not isinstance(k, QKeySequence) else k, self)
+            sc.setContext(Qt.WindowShortcut)
+            sc.activated.connect(lambda fn=fn: fn(_Ev(self)))
+
+    def protocol(self, name, fn):
+        if name == "WM_DELETE_WINDOW":
+            self._on_close = fn
+
+    def closeEvent(self, e):
+        if self._on_close is not None and not getattr(self, "_closing_now", False):
+            e.ignore()
+            fn = self._on_close
+            QTimer.singleShot(0, fn)
+            return
+        self._tk_destroyed = True
+        super().closeEvent(e)
+
+    def destroy(self):
+        if self._tk_destroyed:
+            return
+        self._tk_destroyed = True
+        self._closing_now = True
+        self.close()
+
+    def winfo_exists(self):
+        if self._tk_destroyed:
+            return False
+        try:
+            self.isVisible()
+            return True
+        except RuntimeError:
+            return False
+
+    def after(self, ms, fn):
+        if threading.current_thread() is not threading.main_thread():
+            main = getattr(core, "_A2R_MAIN", None)
+            if main is not None:
+                main._main_q.put(lambda: self.after(ms, fn) if self.winfo_exists() else None)
+            return None
+        t = QTimer(self)
+        t.setSingleShot(True)
+        t.timeout.connect(fn)
+        t.timeout.connect(t.deleteLater)
+        t.start(int(ms))
+        return t
+
+    def after_cancel(self, t):
+        try:
+            if t is not None:
+                t.stop()
+                t.deleteLater()
+        except RuntimeError:
+            pass
+
+    def state(self, s=None):
+        if s is None:
+            if not self.isVisible():
+                return "withdrawn"
+            if self.isMinimized():
+                return "iconic"
+            if self.isMaximized():
+                return "zoomed"
+            return "normal"
+        if s == "zoomed":
+            self.showMaximized()
+        elif s == "normal":
+            self.showNormal()
+
+    def deiconify(self):
+        self.showNormal()
+
+    def show_centered(self, parent=None, w=None, h=None, focus=None):
+        self.adjustSize()
+        if w:
+            self.resize(w, max(h or 0, self.sizeHint().height()))
+        if not self._resizable:
+            self.setFixedSize(self.size())
+        par = parent if isinstance(parent, QWidget) and parent.isVisible() else None
+        scr = (par.screen() if par else QGuiApplication.primaryScreen()).availableGeometry()
+        ref = par.frameGeometry() if par else scr
+        x = ref.center().x() - self.width() // 2
+        y = ref.center().y() - self.height() // 2
+        x = max(scr.left() + 4, min(x, scr.right() - self.width() - 4))
+        y = max(scr.top() + 4, min(y, scr.bottom() - self.height() - 30))
+        self.move(x, y)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        if focus is not None:
+            QTimer.singleShot(30, focus.setFocus)
+
+
+# ───────────────────────── جدول بنفس واجهة ttk.Treeview ─────────────────────────
+class Tree(QTreeWidget, TkCompat):
+    """heading / column / insert(iid, values, tags) / delete / get_children / selection / see / tag_configure."""
+    def __init__(self, parent=None, columns=(), headers=None, widths=None, stretch=()):
+        super().__init__(parent)
+        self._cols = list(columns)
+        self._items = {}
+        self._order = []
+        self._tags = {}
+        self._cmds = {}
+        self._sel_cbs = []
+        self._dbl = []
+        self._menu_cb = None
+        self.setColumnCount(len(columns))
+        self.setHeaderLabels([(headers or {}).get(c, c) for c in columns])
+        self.setRootIsDecorated(False)
+        self.setUniformRowHeights(True)
+        self.setAlternatingRowColors(False)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.setSortingEnabled(False)
+        self.setIndentation(0)
+        hdr = self.header()
+        hdr.setSectionsClickable(True)
+        hdr.setStretchLastSection(False)
+        hdr.setDefaultAlignment(Qt.AlignCenter)
+        hdr.sectionClicked.connect(self._hdr_clicked)
+        for i, c in enumerate(columns):
+            self.setColumnWidth(i, (widths or {}).get(c, 90))
+            hdr.setSectionResizeMode(i, QHeaderView.Interactive)
+        self.itemSelectionChanged.connect(lambda: [f(_Ev(self)) for f in self._sel_cbs])
+        self.itemDoubleClicked.connect(lambda *_: [f(_Ev(self)) for f in self._dbl])
+        self.itemActivated.connect(lambda *_: [f(_Ev(self)) for f in self._dbl])
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._ctx)
+
+    def _hdr_clicked(self, i):
+        fn = self._cmds.get(self._cols[i])
+        if fn:
+            fn()
+
+    def heading(self, col, text=None, command=None):
+        i = self._cols.index(col)
+        if text is not None:
+            self.headerItem().setText(i, text)
+        if command is not None:
+            self._cmds[col] = command
+
+    def column(self, col, width=None, anchor=None, stretch=None):
+        i = self._cols.index(col)
+        if width:
+            self.setColumnWidth(i, width)
+
+    def tag_configure(self, tag, background=None, foreground=None):
+        self._tags[tag] = (background, foreground)
+
+    def insert(self, parent, index, iid=None, values=(), tags=()):
+        it = QTreeWidgetItem([str(v) for v in values])
+        for i in range(len(values)):
+            it.setTextAlignment(i, Qt.AlignCenter)
+        for tg in tags or ():
+            bg, fg = self._tags.get(tg, (None, None))
+            for i in range(len(values)):
+                if bg:
+                    it.setBackground(i, QColor(bg))
+                if fg:
+                    it.setForeground(i, QColor(fg))
+        iid = str(iid if iid is not None else len(self._order))
+        it.setData(0, Qt.UserRole, iid)
+        self.addTopLevelItem(it)
+        self._items[iid] = it
+        self._order.append(iid)
+        return iid
+
+    def delete(self, *iids):
+        if set(iids) >= set(self._order):
+            self.blockSignals(True)
+            self.clear()
+            self.blockSignals(False)
+            self._items.clear()
+            self._order.clear()
+            return
+        for iid in iids:
+            it = self._items.pop(iid, None)
+            if it is not None:
+                self.takeTopLevelItem(self.indexOfTopLevelItem(it))
+                self._order.remove(iid)
+
+    def get_children(self, item=""):
+        return tuple(self._order)
+
+    def exists(self, iid):
+        return str(iid) in self._items
+
+    def selection(self):
+        return tuple(it.data(0, Qt.UserRole) for it in self.selectedItems())
+
+    def selection_set(self, iid):
+        it = self._items.get(str(iid))
+        if it is not None:
+            self.setCurrentItem(it)
+            it.setSelected(True)
+
+    def see(self, iid):
+        it = self._items.get(str(iid))
+        if it is not None:
+            self.scrollToItem(it)
+
+    def bind(self, seq, fn, add=None):
+        if seq == "<<TreeviewSelect>>":
+            self._sel_cbs.append(fn)
+        elif seq == "<Double-1>":
+            self._dbl.append(fn)
+
+    def set_context_menu(self, fn):
+        """fn(iid, global_pos) — كليك يمين على صف."""
+        self._menu_cb = fn
+
+    def _ctx(self, pos):
+        it = self.itemAt(pos)
+        if it is None or self._menu_cb is None:
+            return
+        iid = it.data(0, Qt.UserRole)
+        self.selection_set(iid)
+        self._menu_cb(iid, self.viewport().mapToGlobal(pos))
+
+    def batch(self, on):
+        self.setUpdatesEnabled(not on)
+
+
+def popup_menu(parent, items, pos):
+    """items: [(label, fn) | None للفاصل] — الإيموجي في أول النص بيتحول لأيقونة."""
+    m = QMenu(parent)
+    m.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+    col = ThemeState.p()["text"]
+    for entry in items:
+        if entry is None:
+            m.addSeparator()
+            continue
+        label, fn = entry
+        name, txt = split_icon(label)
+        act = QAction(txt, m)
+        if name:
+            act.setIcon(make_icon(name, col, 14))
+        act.triggered.connect(lambda _c=False, fn=fn: fn())
+        m.addAction(act)
+    m.exec(pos)
+
+
+def hbox(*widgets, spacing=6, margins=(0, 0, 0, 0), stretch_at=None):
+    lay = QHBoxLayout()
+    lay.setSpacing(spacing)
+    lay.setContentsMargins(*margins)
+    for i, w in enumerate(widgets):
+        if w is None:
+            lay.addStretch(1)
+        elif isinstance(w, int):
+            lay.addSpacing(w)
+        elif hasattr(w, "addWidget") and not isinstance(w, QWidget):
+            lay.addLayout(w)
+        else:
+            lay.addWidget(w, 1 if stretch_at == i else 0)
+    return lay
+
+
+def vbox(*widgets, spacing=6, margins=(0, 0, 0, 0)):
+    lay = QVBoxLayout()
+    lay.setSpacing(spacing)
+    lay.setContentsMargins(*margins)
+    for w in widgets:
+        if w is None:
+            lay.addStretch(1)
+        elif isinstance(w, int):
+            lay.addSpacing(w)
+        elif hasattr(w, "addWidget") and not isinstance(w, QWidget):
+            lay.addLayout(w)
+        else:
+            lay.addWidget(w)
+    return lay
+
+
+def legend_html(pairs):
+    """[(لون, نص)] → مربعات ملوّنة بدل 🟥🟨🟧🟪."""
+    return "&nbsp;&nbsp;&nbsp;".join(f'<span style="color:{c}">&#9632;</span>&nbsp;{t}' for c, t in pairs)
+
+# ======================================================================
+# البرنامج الرئيسي
+# ======================================================================
+# -*- coding: utf-8 -*-
+"""A2R POS Console — الواجهة الجديدة (PySide6 / Qt).
+المضمون والسلوك = نفس الكونسول v97 بالظبط: كل المنطق (أول جزء في الملف ده) منقول حرف بحرف،
+والملف ده فيه الشكل بس (الشاشة الرئيسية + الميني + كل النوافذ الفرعية)."""
+import os
+import sys
+import glob
+import time
+import queue
+import datetime
+import threading
+import subprocess
+from collections import Counter
+
+
+from PySide6.QtCore import (Qt, QTimer, QSize, QEvent, QObject, QAbstractListModel, QModelIndex, QRect,
+                            QRegularExpression, QPoint)
+from PySide6.QtGui import (QIcon, QFont, QColor, QPainter, QPen, QKeySequence, QShortcut, QAction, QGuiApplication,
+                           QRegularExpressionValidator, QFontMetrics, QPixmap)
+from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout,
+                               QListView, QStyledItemDelegate, QStyle, QAbstractItemView, QSystemTrayIcon, QMenu,
+                               QSizePolicy, QTabWidget, QSplitter, QRadioButton, QButtonGroup, QCheckBox)
+
+
+APP_TITLE = f"A2R POS Console - {APP_OWNER}"     # اسم النافذة (برضه بيتدوّر عليه لو البرنامج اتفتح مرتين)
+APP_NAME = "A2R POS Console"
+FOOT_TEXT = f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria"
+FULL_W, FULL_H = 800, 500
+MINI_W, MINI_H = 440, 232
+
+
+def T(ar, en):
+    return T2(ar, en)
+
+
+def _sep(vertical=True):
+    f = QFrame()
+    f.setObjectName("VSep" if vertical else "HSep")
+    return f
+
+
+def _startfile(p, *a):
+    """os.startfile موجودة على ويندوز بس."""
+    if hasattr(os, "startfile"):
+        os.startfile(p, *a)
+
+
+# ───────────────────────── شاشة الدخول (ElevateLoginGate) ─────────────────────────
+class LoginGate(Window):
+    def __init__(self, parent, on_success):
+        super().__init__(parent, title="A2R Authorization", modal=True)
+        self.parent_app = parent
+        self.on_success = on_success
+        p = ThemeState.p()
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        bar = QFrame()
+        bar.setFixedHeight(3)
+        bar.setStyleSheet(f"background:{p['bad']}; border:none;")
+        root.addWidget(bar)
+        body = QVBoxLayout()
+        body.setContentsMargins(14, 10, 14, 6)
+        card = Card()
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(16, 10, 16, 12)
+        cl.setSpacing(6)
+        title = Label("A2R POS CONSOLE", size=14, color_key="acc", align=Qt.AlignCenter)
+        title.lbl.setStyleSheet("letter-spacing:1px;")
+        cl.addWidget(title, 0, Qt.AlignHCenter)
+        cl.addWidget(Label(tr("login_prompt"), size=8.5, color_key="muted", align=Qt.AlignCenter), 0, Qt.AlignHCenter)
+        self.e_pwd = Entry(show=True, justify="center")
+        self.e_pwd.setMinimumHeight(32)
+        f = self.e_pwd.font(); f.setPointSize(11); f.setBold(True); self.e_pwd.setFont(f)
+        self.e_pwd.bind("<Return>", lambda e: self.check_pwd())
+        self.pwd_visible = False
+        self.btn_eye = Button("👁️", command=self.toggle_eye)
+        self.btn_eye.setFixedSize(40, 32)
+        cl.addLayout(hbox(self.e_pwd, self.btn_eye, stretch_at=0))
+        self.lbl_err = Label("", size=8.5, color_key="bad", align=Qt.AlignCenter)
+        cl.addWidget(self.lbl_err)
+        btn_enter = Button(tr("btn_full_console"), command=self.check_pwd, role="dangerfill", big=True)
+        cl.addWidget(btn_enter)
+        body.addWidget(card)
+        foot = Label(FOOT_TEXT, size=7.5, color_key="muted", align=Qt.AlignCenter)
+        body.addWidget(foot)
+        root.addLayout(body)
+        self.show_centered(parent, 365, 225, focus=self.e_pwd)
+
+    def toggle_eye(self):
+        if self.pwd_visible:
+            self.e_pwd.configure(show="•")
+            self.btn_eye.configure(text="👁️")
+            self.pwd_visible = False
+        else:
+            self.e_pwd.configure(show="")
+            self.btn_eye.configure(text="🙈")
+            self.pwd_visible = True
+
+    def check_pwd(self):
+        # نفس منطق الكونسول بالظبط (القفل المؤقت + هاش المشرف + هاشات الموظفين)
+        rem = sup_lock_remaining()
+        if rem > 0:
+            self.lbl_err.configure(text=T2(f"مقفول مؤقتًا. حاول بعد {rem} ثانية.", f"Locked. Try again in {rem}s."))
+            self.e_pwd.delete(0, 'end')
+            return
+        val = self.e_pwd.get().strip().lower()
+        h_val = hashlib.sha256(val.encode('utf-8')).hexdigest()
+        if is_supervisor_password(val):
+            sup_register_success()
+            self.destroy()
+            self.on_success(is_supervisor=True)
+        elif h_val in EMPLOYEE_HASHES:
+            sup_register_success()
+            self.destroy()
+            self.on_success(is_supervisor=False)
+        else:
+            sup_register_fail()
+            self.lbl_err.configure(text=tr("access_denied"))
+            self.e_pwd.delete(0, 'end')
+            try: winsound.MessageBeep(winsound.MB_ICONHAND)
+            except Exception as _e: _log_silent("check_pwd#1", _e)
+
+
+# ───────────────────────── «آخر العمليات» ─────────────────────────
+class OpsModel(QAbstractListModel):
+    def __init__(self):
+        super().__init__()
+        self.rows = []
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.rows)
+
+    def data(self, idx, role=Qt.DisplayRole):
+        if not idx.isValid():
+            return None
+        r = self.rows[idx.row()]
+        if role == Qt.UserRole:
+            return r
+        if role == Qt.DisplayRole:
+            return f"{r['plate']} {r['amount']}"
+        if role == Qt.AccessibleTextRole:
+            return f"{r['plate']} — {r['name']} — {r['status']} — {r['amount']} — {r['time']}"
+        return None
+
+    def set_rows(self, rows):
+        self.beginResetModel()
+        self.rows = rows
+        self.endResetModel()
+
+
+def ops_rows_from_records(records):
+    """كل عمليات اليوم (الأحدث فوق). اللون حسب الحالة: سليم / يدوي / مكرر / ملغي (مشطوب) / ناقص أو وحدة تانية."""
+    out = []
+    recs = sorted(records or [], key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=True)
+    for r in recs:
+        kind = r.get("kind") or ("void" if r.get("is_void") else ("manual" if r.get("is_manual") else "ok"))
+        if r.get("is_void"):
+            kind = "void"
+        lab = {"ok": T2("سليم", "OK"), "manual": T2("يدوي", "Manual"), "dup": T2("مكرر", "Duplicate"),
+               "void": T2("ملغي", "Void"), "wrong": T2("وحدة مختلفة", "Other unit"),
+               "missing": T2("ناقص", "Incomplete")}.get(kind, r.get("status_text", ""))
+        tm = str(r.get("time", "") or "")
+        tm = tm[-5:] if len(tm) >= 5 and tm[-3] == ":" else tm
+        name = str(r.get("insured", "") or "-")
+        plate = str(r.get("plate", "") or "-")
+        try:
+            amt = f"{float(r.get('amount', 0)):,.2f}"
+        except Exception:
+            amt = str(r.get("amount", ""))
+        out.append({"kind": kind, "status": lab, "time": tm, "name": name, "plate": plate, "amount": amt})
+    return out
+
+
+class OpsDelegate(QStyledItemDelegate):
+    ROW_H = 40
+
+    def sizeHint(self, option, index):
+        return QSize(option.rect.width(), self.ROW_H)
+
+    def paint(self, pa, option, index):
+        r = index.data(Qt.UserRole)
+        if not r:
+            return
+        p = ThemeState.p()
+        rect = option.rect
+        pa.save()
+        pa.setRenderHint(QPainter.Antialiasing)
+        selected = bool(option.state & QStyle.State_Selected)
+        if selected:
+            pa.fillRect(rect, QColor(p["sel"]))
+        elif option.state & QStyle.State_MouseOver:
+            pa.fillRect(rect, QColor(p["hover"]))
+        col = {"ok": p["ok"], "manual": p["man"], "dup": p["warn"], "void": p["bad"],
+               "wrong": p["warn"], "missing": p["warn"]}.get(r["kind"], p["muted"])
+        rtl = option.direction == Qt.RightToLeft
+        stripe_x = rect.right() - 4 if rtl else rect.left() + 1
+        pa.setPen(Qt.NoPen)
+        pa.setBrush(QColor(col))
+        pa.drawRoundedRect(QRect(stripe_x, rect.top() + 6, 3, rect.height() - 12), 1.5, 1.5)
+        inner = rect.adjusted(12, 4, -12, -4) if True else rect
+        f_b = QFont(option.font); f_b.setBold(True); f_b.setPointSizeF(8.6)
+        f_s = QFont(option.font); f_s.setBold(False); f_s.setPointSizeF(7.6)
+        text_col = QColor(p["sel_text"] if selected else p["text"])
+        muted = QColor(p["muted"])
+        top = QRect(inner.left(), inner.top(), inner.width(), inner.height() // 2)
+        bot = QRect(inner.left(), inner.top() + inner.height() // 2, inner.width(), inner.height() // 2)
+        lead = Qt.AlignRight if rtl else Qt.AlignLeft
+        trail = Qt.AlignLeft if rtl else Qt.AlignRight
+        # المبلغ والوقت ناحية، واللوحة/الاسم ناحية
+        fm_b = QFontMetrics(f_b)
+        amt_w = max(fm_b.horizontalAdvance(r["amount"]), 40) + 4
+        if rtl:
+            amt_top = QRect(top.left(), top.top(), amt_w, top.height())
+            amt_bot = QRect(bot.left(), bot.top(), amt_w, bot.height())
+            txt_top = QRect(top.left() + amt_w + 6, top.top(), top.width() - amt_w - 6, top.height())
+            txt_bot = QRect(bot.left() + amt_w + 6, bot.top(), bot.width() - amt_w - 6, bot.height())
+        else:
+            amt_top = QRect(top.right() - amt_w, top.top(), amt_w, top.height())
+            amt_bot = QRect(bot.right() - amt_w, bot.top(), amt_w, bot.height())
+            txt_top = QRect(top.left(), top.top(), top.width() - amt_w - 6, top.height())
+            txt_bot = QRect(bot.left(), bot.top(), bot.width() - amt_w - 6, bot.height())
+        pa.setFont(f_b)
+        pa.setPen(text_col)
+        pa.drawText(txt_top, lead | Qt.AlignVCenter, QFontMetrics(f_b).elidedText(r["plate"], Qt.ElideRight, txt_top.width()))
+        if r["kind"] == "void":
+            fv = QFont(f_b); fv.setStrikeOut(True); pa.setFont(fv)
+            c2 = QColor(text_col); c2.setAlphaF(0.6); pa.setPen(c2)
+        pa.drawText(amt_top, trail | Qt.AlignVCenter, r["amount"])
+        pa.setFont(f_s)
+        pa.setPen(muted)
+        sub = f"{r['name']} · {r['status']}"
+        pa.drawText(txt_bot, lead | Qt.AlignVCenter, QFontMetrics(f_s).elidedText(sub, Qt.ElideRight, txt_bot.width()))
+        pa.drawText(amt_bot, trail | Qt.AlignVCenter, r["time"])
+        pa.setPen(QPen(QColor(p["border"]), 1))
+        pa.drawLine(rect.left() + 4, rect.bottom(), rect.right() - 4, rect.bottom())
+        pa.restore()
+
+
+class OpsList(QListView):
+    """كل عمليات اليوم في نفس مساحة اللوحة: بكرة الماوس / الاسكرول / الأسهم / PageUp-PageDown / Home / End."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.model_ = OpsModel()
+        self.setModel(self.model_)
+        self.setItemDelegate(OpsDelegate(self))
+        self.setUniformItemSizes(True)
+        self.setMouseTracking(True)
+        self.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(20)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setObjectName("OpsList")
+
+    def set_rows(self, rows):
+        cur = self.currentIndex().row()
+        top = self.verticalScrollBar().value()
+        self.model_.set_rows(rows)
+        if 0 <= cur < len(rows):
+            self.setCurrentIndex(self.model_.index(cur))
+            self.verticalScrollBar().setValue(top)
+
+    def keyPressEvent(self, e):
+        n = self.model_.rowCount()
+        if n and e.key() in (Qt.Key_Home, Qt.Key_End):
+            row = 0 if e.key() == Qt.Key_Home else n - 1
+            idx = self.model_.index(row)
+            self.setCurrentIndex(idx)
+            self.scrollTo(idx)
+            return
+        if n and not self.currentIndex().isValid() and e.key() in (Qt.Key_Down, Qt.Key_Up, Qt.Key_PageDown, Qt.Key_PageUp):
+            self.setCurrentIndex(self.model_.index(0))
+            return
+        super().keyPressEvent(e)
+
+
+# ───────────────────────── صينية الساعة ─────────────────────────
+class TrayAdapter:
+    """نفس اللي الكونسول بيستخدمه من pystray: visible / notify(msg, title) / stop()."""
+    def __init__(self, tray):
+        self.tray = tray
+
+    @property
+    def visible(self):
+        return self.tray.isVisible()
+
+    def notify(self, msg, title=APP_NAME):
+        if title == "A2R Console":
+            title = APP_NAME
+        self.tray.showMessage(title, msg, self.tray.icon(), 6000)
+
+    def stop(self):
+        self.tray.hide()
+
+
+class _ActivityFilter(QObject):
+    def __init__(self, app_win):
+        super().__init__()
+        self.app_win = app_win
+        self._last = 0.0
+
+    def eventFilter(self, obj, ev):
+        t = ev.type()
+        if t in (QEvent.KeyPress, QEvent.MouseButtonPress, QEvent.Wheel, QEvent.MouseMove):
+            now = time.monotonic()
+            if t != QEvent.MouseMove or now - self._last > 0.5:
+                self._last = now
+                try:
+                    self.app_win._on_user_interaction()
+                except Exception as e:
+                    _log_silent("activity_filter", e)
+        return False
+
+
+# ───────────────────────── النافذة الرئيسية ─────────────────────────
+class MainWindow(QWidget, core.ConsoleLogic):
+    def __init__(self):
+        super().__init__()
+        core._A2R_MAIN = self
+        self.setObjectName("Root")
+        self.setAttribute(Qt.WA_StyledBackground, True)
+        self._timers = {}
+        # v96: أي شغل على الشاشة جاي من خيط تاني (جسر كروم / الصينية) بيستنى هنا ويتنفذ على الخيط الرئيسي
+        self._main_q = queue.Queue()
+        self._bridge_snap = {}
+        self._bridge_snap_ts = 0.0
+        self.after(40, self._pump_main_queue)
+        self.setWindowTitle(APP_TITLE)
+        ico = get_app_icon_path()
+        if ico:
+            self.setWindowIcon(QIcon(ico))
+
+        _cfg = _read_app_config()
+        _saved_lang = _cfg.get("lang")
+        self.current_lang = _saved_lang if _saved_lang in LANGUAGES else "en"
+        core.CURRENT_LANG = self.current_lang
+        self.current_theme_name = ui.theme_from_config(_cfg.get("theme"))
+        if "sound_muted" in _cfg:
+            core.SOUND_MUTED = bool(_cfg.get("sound_muted"))
+
+        self.is_mini_mode = True
+        # المزامنة والطباعة الفورية تعملان دائمًا مع كل تشغيل للجهاز/البرنامج
+        self.auto_sync_enabled = True
+        self.auto_print_enabled = True
+
+        self.is_supervisor = False
+        self.last_generated_file = None
+        self.system_total_sum = 0.0
+        self.last_detailed_records = []
+        self.last_units_summary = {}
+        self.last_summary_info = {}
+
+        self.printed_count_today = 0
+        self._printed_count_day = datetime.date.today()
+        self.last_printed_pdf = None
+        self.processing_lock = threading.Lock()
+        self.is_processing = False
+        self.last_pdf_state_sig = ""
+        self.printed_receipts_set = set()
+        self._watch_path = DEFAULT_RECEIPTS_DIR
+
+        self.tray_icon = None
+        self._auto_minimize_timer = None
+        self.autostart_silent = ("--autostart" in sys.argv)
+
+        self.setup_ui()
+        self.apply_theme(self.current_theme_name)
+        self.apply_language(self.current_lang)
+
+        self.reset_all()
+        self._sync_watch_path()
+
+        # مراقبة نشاط المستخدم لتصفير مؤقت الخمول 30 ثانية
+        self._activity = _ActivityFilter(self)
+        QApplication.instance().installEventFilter(self._activity)
+
+        p = self.get_clean_path()
+        if os.path.exists(p):
+            for f in glob.glob(os.path.join(p, "*.pdf")):
+                fn = os.path.basename(f)
+                self.printed_receipts_set.add(fn)
+                self.printed_receipts_set.add(clean_download_filename(fn))
+
+        self.init_watchdogs()
+        setup_windows_autostart()
+        self._init_tray_icon()
+
+        if self.autostart_silent:
+            self.switch_to_mini_view(show=False)
+            if self.tray_icon is None:
+                self.showMinimized()
+        else:
+            self.switch_to_mini_view()
+
+        # تنزيل/تحديث إضافة كروم + تشغيل الجسر المحلي (127.0.0.1) — نفس الكونسول
+        threading.Thread(target=ensure_chrome_extension_extracted, daemon=True).start()
+        self._bridge_server = start_local_chrome_bridge(self)
+
+        self.after(1500, lambda: self.start_thread() if (self.auto_sync_enabled and not self.is_processing) else None)
+        self._refresh_mini_archive_label()
+        self._archive_tick_started = True
+        self.after(2500, self.auto_archive_on_login)
+        self.after(600000, self._archive_tick)
+        # «آخر العمليات» بتتحدث لوحدها لما سجلات اليوم تتغير (فحص / إلغاء / استرجاع)
+        self._ops_sig = None
+        self._ops_timer = QTimer(self)
+        self._ops_timer.timeout.connect(self._refresh_ops)
+        self._ops_timer.start(700)
+
+    # ---------- واجهة Tk اللي الدوال المنقولة بتستخدمها ----------
+    def after(self, ms, fn):
+        if threading.current_thread() is not threading.main_thread():
+            self._main_q.put(lambda: self.after(ms, fn))
+            return None
+        t = QTimer(self)
+        t.setSingleShot(True)
+
+        def _run(t=t):
+            self._timers.pop(id(t), None)
+            t.deleteLater()
+            fn()
+        t.timeout.connect(_run)
+        self._timers[id(t)] = t
+        t.start(max(0, int(ms)))
+        return t
+
+    def after_cancel(self, t):
+        try:
+            if t is not None:
+                t.stop()
+                self._timers.pop(id(t), None)
+                t.deleteLater()
+        except RuntimeError:
+            pass
+
+    def state(self, s=None):
+        if s is None:
+            if not self.isVisible():
+                return "withdrawn"
+            if self.isMinimized():
+                return "iconic"
+            return "normal"
+        if s == "normal":
+            self.showNormal()
+
+    def iconify(self):
+        self.showMinimized()
+
+    def withdraw(self):
+        self.hide()
+
+    def deiconify(self):
+        self.showNormal()
+
+    def lift(self):
+        self.raise_()
+        self.activateWindow()
+
+    def focus_force(self):
+        self.lift()
+
+    def focus_get(self):
+        return None
+
+    def winfo_toplevel(self):
+        w = QApplication.activeWindow()
+        return w if w is not None else self
+
+    def winfo_exists(self):
+        return True
+
+    def destroy(self):
+        QApplication.instance().quit()
+
+    # ---------- الصينية ----------
+    def _init_tray_icon(self):
+        try:
+            if not QSystemTrayIcon.isSystemTrayAvailable():
+                self.tray_icon = None
+                return
+            tray = QSystemTrayIcon(self.windowIcon() if not self.windowIcon().isNull() else
+                                   make_icon("screen", "#38BDF8", 32), self)
+            tray.setToolTip(APP_NAME)
+            m = QMenu()
+            self._tray_menu = m
+            a_open = QAction(tr("tray_open"), m)
+            a_open.triggered.connect(lambda: self.show_from_system_tray())
+            f = a_open.font(); f.setBold(True); a_open.setFont(f)
+            a_cons = QAction(tr("tray_console"), m)
+            a_cons.triggered.connect(lambda: self.run_on_main(self.request_full_console_from_tray))
+            a_exit = QAction(tr("tray_exit"), m)
+            a_exit.triggered.connect(lambda: self.quit_app_completely())
+            m.addAction(a_open)
+            m.addAction(a_cons)
+            m.addSeparator()
+            m.addAction(a_exit)
+            tray.setContextMenu(m)
+            tray.activated.connect(lambda reason: self.show_from_system_tray()
+                                   if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick) else None)
+            tray.show()
+            self._tray = tray
+            self.tray_icon = TrayAdapter(tray)
+        except Exception as e:
+            self.tray_icon = None
+            log_exception("init_tray_icon", e)
+
+    def _has_open_child_windows(self):
+        """يتحقق إذا كانت هناك أي نافذة فرعية مفتوحة (حاسبة الكاش، الإضافة اليدوية، الأرشيف، عرض السجلات، إلخ)."""
+        try:
+            for w in QApplication.topLevelWidgets():
+                if w is self or not w.isVisible():
+                    continue
+                if isinstance(w, Window) or w.isWindow() and w.inherits("QDialog"):
+                    return True
+        except Exception as _e:
+            _log_silent("_has_open_child_windows", _e)
+        return False
+
+    def closeEvent(self, e):
+        # زر X بينزّل البرنامج جنب الساعة (زي الكونسول)
+        e.ignore()
+        self.hide_to_system_tray()
+
+    def hide_to_system_tray(self):
+        self._cancel_auto_minimize()
+        if self.tray_icon is None:
+            self._init_tray_icon()
+        if self.tray_icon is None:
+            self.showMinimized()        # مفيش صينية: نصغّر لشريط المهام حتى لا يضيع البرنامج
+            return
+        self.hide()
+
+    def show_from_system_tray(self, icon=None, item=None):
+        def _restore():
+            if self.is_mini_mode:
+                self.switch_to_mini_view()
+            else:
+                self.switch_to_full_view()
+            self.lift()
+        self.run_on_main(_restore)
+
+    def request_full_console_from_tray(self):
+        self.showNormal()
+        self.lift()
+        self.request_full_console()
+
+    def quit_app_completely(self, icon=None, item=None):
+        self._cancel_auto_minimize()
+        if getattr(self, "_bridge_server", None):
+            try: self._bridge_server.shutdown()
+            except Exception as _e: _log_silent("quit_bridge", _e)
+        if self.tray_icon:
+            try: self.tray_icon.stop()
+            except Exception as _e: _log_silent("quit_app_completely#1", _e)
+        self.run_on_main(QApplication.instance().quit)
+
+    # ---------- الميني / الكاملة ----------
+    def _place(self, w, h):
+        scr = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+        w = min(w, scr.width() - 40)
+        h = min(h, scr.height() - 40)
+        self.setFixedSize(w, h)
+        self.move(scr.left() + (scr.width() - w) // 2, scr.top() + (scr.height() - h) // 2)
+
+    def switch_to_mini_view(self, show=True):
+        self.is_mini_mode = True
+        self.body_full.hide()
+        self.b_bar.hide()
+        self.btn_back_to_mini.hide()
+        self.f_role_btn.hide()
+        self.body_mini.show()
+        self._refresh_mini_archive_label()
+        self._place(MINI_W, MINI_H)
+        if not show:
+            return
+        self.showNormal()
+        self.lift()
+        self._schedule_auto_minimize(5000)
+
+    def switch_to_full_view(self):
+        self.is_mini_mode = False
+        self.body_mini.hide()
+        self.btn_back_to_mini.show()
+        self.f_role_btn.show()
+        self.b_bar.show()
+        self.body_full.show()
+        self._place(FULL_W, FULL_H)
+        self.showNormal()
+        self.lift()
+        # Esc بيقفل النوافذ الفرعية بس. النافذة الرئيسية مفيهاش Esc
+        if not getattr(self, "_keys_bound", False):
+            self._keys_bound = True
+            for seq, fn in (("Ctrl+R", lambda: self.start_thread()), ("F2", lambda: self.open_manual()),
+                            ("F3", lambda: self.print_slip()), ("F4", lambda: self.open_cash_counter())):
+                sc = QShortcut(QKeySequence(seq), self)
+                sc.setContext(Qt.WindowShortcut)
+                sc.activated.connect(fn)
+        self._schedule_auto_minimize(30000)
+
+    # ---------- بناء الشاشة ----------
+    def setup_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ===== الهيدر =====
+        self.header = QFrame()
+        self.header.setObjectName("Header")
+        self.header.setFixedHeight(40)
+        hl = QHBoxLayout(self.header)
+        hl.setContentsMargins(10, 0, 10, 0)
+        hl.setSpacing(6)
+        self.lbl_logo = QLabel()
+        self.lbl_logo.setTextFormat(Qt.RichText)
+        hl.addWidget(self.lbl_logo)
+        self.cb_theme = Combo(readonly=True, command=self._theme_picked)
+        self.cb_theme.setFixedWidth(84)
+        self.cb_theme.setMinimumHeight(26)
+        hl.addWidget(self.cb_theme)
+        self.btn_lang = Button("🌐 عربي", command=self.toggle_language, role="pill")
+        hl.addWidget(self.btn_lang)
+        self.btn_mute = Button(("🔇 Muted" if core.SOUND_MUTED else "🔊 Sound"), command=self.toggle_mute, role="pill")
+        hl.addWidget(self.btn_mute)
+        hl.addStretch(1)
+        self.lbl_clock = Label("", size=9.5, color_key="acc")
+        hl.addWidget(self.lbl_clock)
+        self.f_role_btn = RoleBadge()
+        rl = QHBoxLayout(self.f_role_btn)
+        rl.setContentsMargins(8, 1, 8, 1)
+        self.badge_role = Label("● USER", size=7.5)
+        rl.addWidget(self.badge_role)
+        self.f_role_btn.setFixedHeight(22)
+        hl.addWidget(self.f_role_btn)
+        self.btn_back_to_mini = Button(tr("btn_back_mini"), command=self.switch_to_mini_view, role="soft", icon="mini")
+        hl.addWidget(self.btn_back_to_mini)
+        root.addWidget(self.header)
+        self.update_live_clock()
+
+        # ===== الميني =====
+        self.body_mini = QWidget()
+        ml = QVBoxLayout(self.body_mini)
+        ml.setContentsMargins(12, 8, 12, 0)
+        ml.setSpacing(7)
+        self.card_mini_status = Card()
+        cl = QVBoxLayout(self.card_mini_status)
+        cl.setContentsMargins(12, 8, 12, 8)
+        cl.setSpacing(2)
+        self.lbl_mini_title = Label(tr("mini_station_title"), size=10, color_key="acc")
+        self.btn_fix_printer = Button(self._paper_btn_text(), command=self.fix_printer_paper_action)
+        self.btn_fix_printer.setMinimumHeight(22)
+        self.btn_fix_printer.setMaximumHeight(24)
+        cl.addLayout(hbox(self.lbl_mini_title, None, self.btn_fix_printer))
+        self.lbl_mini_desc = Label(tr("mini_status_active"), size=8.5, color_key="ok")
+        cl.addWidget(self.lbl_mini_desc)
+        self.lbl_mini_counter = Label(tr("mini_printed_count", count=0), size=8.5, color_key="muted")
+        cl.addWidget(self.lbl_mini_counter)
+        self.lbl_mini_archive = Label("", size=7.8, color_key="muted")
+        cl.addWidget(self.lbl_mini_archive)
+        ml.addWidget(self.card_mini_status)
+        self.btn_mini_reprint = Button(tr("mini_reprint_last"), command=self.reprint_last_receipt, big=True)
+        self.btn_elevate = Button(tr("btn_full_console"), command=self.request_full_console, role="primary", big=True)
+        g = QHBoxLayout()
+        g.setSpacing(8)
+        g.addWidget(self.btn_mini_reprint, 1)
+        g.addWidget(self.btn_elevate, 1)
+        ml.addLayout(g)
+        ml.addStretch(1)
+        self.lbl_mini_foot = Label(FOOT_TEXT, size=7.2, color_key="muted", align=Qt.AlignCenter)
+        ml.addWidget(self.lbl_mini_foot, 0, Qt.AlignHCenter)
+        ml.addSpacing(4)
+        root.addWidget(self.body_mini, 1)
+
+        # ===== الكاملة =====
+        self.body_full = QWidget()
+        grid = QGridLayout(self.body_full)
+        grid.setContentsMargins(10, 8, 10, 0)
+        grid.setHorizontalSpacing(7)
+        grid.setVerticalSpacing(7)
+        main_col = QVBoxLayout()
+        main_col.setSpacing(7)
+
+        # بطاقة المسار والتاريخ والمفاتيح
+        self.card_top = Card()
+        tl = QHBoxLayout(self.card_top)
+        tl.setContentsMargins(10, 8, 10, 8)
+        tl.setSpacing(10)
+        left = QVBoxLayout()
+        left.setSpacing(6)
+        self.lbl_folder = Label("", size=8, color_key="muted")
+        self.lbl_folder.setFixedWidth(116)
+        self.e_path = Entry()
+        self.e_path.setLayoutDirection(Qt.LeftToRight)
+        self.e_path.setAlignment(Qt.AlignRight | Qt.AlignVCenter) if False else None
+        self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
+        self.btn_browse = Button("", command=self.browse_folder, role="primary", icon="folder")
+        self.btn_open_f = Button("", command=self.open_current_folder)
+        left.addLayout(hbox(self.lbl_folder, self.e_path, self.btn_browse, self.btn_open_f, stretch_at=1))
+        self.lbl_d = Label("", size=8, color_key="muted")
+        self.lbl_d.setFixedWidth(116)
+        today = datetime.date.today()
+        self.cb_d = Combo(values=[f"{d:02d}" for d in range(1, 32)], center=True)
+        self.cb_d.set(f"{today.day:02d}")
+        self.cb_m = Combo(values=[f"{m:02d}" for m in range(1, 13)], center=True)
+        self.cb_m.set(f"{today.month:02d}")
+        self.cb_y = Combo(values=[str(y) for y in range(today.year - 3, today.year + 3)], center=True)
+        self.cb_y.set(str(today.year))
+        for c, w in ((self.cb_d, 50), (self.cb_m, 50), (self.cb_y, 62)):
+            c.setFixedWidth(w)
+            c.setLayoutDirection(Qt.LeftToRight)
+        self.btn_today = Button("", command=self.set_today, role="soft")
+        self.btn_yesterday = Button("", command=self.set_yesterday)
+        left.addLayout(hbox(self.lbl_d, self.cb_d, self.cb_m, self.cb_y, self.btn_today, self.btn_yesterday, None))
+        tl.addLayout(left, 1)
+        tl.addWidget(_sep())
+        sw_col = QVBoxLayout()
+        sw_col.setSpacing(9)
+        self.sw_autosync = Switch(command=self.toggle_autosync)
+        self.lbl_sw_sync = Label("", size=8)
+        self.sw_autoprint = Switch(command=self.toggle_autoprint)
+        self.lbl_sw_print = Label("", size=8)
+        sw_col.addStretch(1)
+        sw_col.addLayout(hbox(self.sw_autosync, self.lbl_sw_sync, None))
+        sw_col.addLayout(hbox(self.sw_autoprint, self.lbl_sw_print, None))
+        sw_col.addStretch(1)
+        tl.addLayout(sw_col)
+        if self.auto_sync_enabled: self.sw_autosync.select()
+        else: self.sw_autosync.deselect()
+        if self.auto_print_enabled: self.sw_autoprint.select()
+        else: self.sw_autoprint.deselect()
+        main_col.addWidget(self.card_top)
+
+        # الكروت: الإجمالي / العدد / مطابقة الخزينة
+        self.card_dash = QWidget()
+        dl = QHBoxLayout(self.card_dash)
+        dl.setContentsMargins(0, 0, 0, 0)
+        dl.setSpacing(7)
+        self.pill_c2 = Card(name="Hero")
+        h2 = QVBoxLayout(self.pill_c2)
+        h2.setContentsMargins(12, 8, 12, 8)
+        h2.setSpacing(1)
+        self.lbl_kpi2_title = Label("", size=8, color_key="hero_muted")
+        self.lbl_sum = Label("0.00 EGP", size=17, color_key="hero_text")
+        h2.addWidget(self.lbl_kpi2_title)
+        h2.addWidget(self.lbl_sum)
+        h2.addStretch(1)
+        self.pill_c1 = Card()
+        h1 = QVBoxLayout(self.pill_c1)
+        h1.setContentsMargins(12, 8, 12, 8)
+        h1.setSpacing(1)
+        self.lbl_kpi1_title = Label("", size=8, color_key="muted")
+        self.lbl_cnt = Label("0", size=17)
+        h1.addWidget(self.lbl_kpi1_title)
+        h1.addWidget(self.lbl_cnt)
+        h1.addStretch(1)
+        pos_card = Card()
+        h3 = QVBoxLayout(pos_card)
+        h3.setContentsMargins(10, 7, 10, 7)
+        h3.setSpacing(4)
+        self.lbl_pos_title = Label("", size=8, color_key="muted")
+        self.e_pos = Entry(placeholder="POS / Cash Total", justify="center")
+        self.e_pos.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[\d,]*\.?\d*$"), self.e_pos))
+        self.e_pos.setLayoutDirection(Qt.LeftToRight)
+        self.e_pos.bind("<Return>", lambda e: self.check_pos())
+        self.btn_pos_check = Button("", command=self.check_pos, role="primary")
+        self.lbl_diff = Label("", size=8.5)
+        h3.addWidget(self.lbl_pos_title)
+        h3.addLayout(hbox(self.e_pos, self.btn_pos_check, stretch_at=0, spacing=5))
+        h3.addWidget(self.lbl_diff)
+        dl.addWidget(self.pill_c2, 145)
+        dl.addWidget(self.pill_c1, 80)
+        dl.addWidget(pos_card, 125)
+        main_col.addWidget(self.card_dash)
+
+        # بطاقة التشغيل
+        self.card_actions = Card()
+        al = QVBoxLayout(self.card_actions)
+        al.setContentsMargins(10, 8, 10, 8)
+        al.setSpacing(5)
+        self.btn_run = Button("", command=self.start_thread, role="primary", big=True)
+        self.btn_run.setMinimumHeight(34)
+        al.addWidget(self.btn_run)
+        self.progress_bar = Progress()
+        self.progress_bar.set(0)
+        self.lbl_progress_pct = Label("0%", size=8.5)
+        self.lbl_progress_pct.setFixedWidth(40)
+        al.addLayout(hbox(self.progress_bar, self.lbl_progress_pct, stretch_at=0, spacing=8))
+        self.lbl_current_file = Label("", size=7.6, bold=False, color_key="muted")
+        self.lbl_current_file.lbl.setLayoutDirection(Qt.LeftToRight)
+        al.addWidget(self.lbl_current_file)
+        self.btn_manual = Button("", command=self.open_manual)
+        self.btn_summary_reopen = Button("", command=self.reopen_summary_modal)
+        self.btn_cash = Button("", command=self.open_cash_counter)
+        self.btn_archive_downloads = Button("", command=self.open_downloads_archiver_dialog)
+        self.btn_reset = Button("", command=self.confirm_and_reset, role="danger", icon="reset")
+        ag = QHBoxLayout()
+        ag.setSpacing(6)
+        for b, s in ((self.btn_manual, 10), (self.btn_summary_reopen, 10), (self.btn_cash, 10),
+                     (self.btn_archive_downloads, 10), (self.btn_reset, 8)):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            ag.addWidget(b, s)
+        al.addLayout(ag)
+        main_col.addWidget(self.card_actions)
+        main_col.addStretch(1)
+
+        # «آخر العمليات»
+        self.card_ops = Card()
+        ol = QVBoxLayout(self.card_ops)
+        ol.setContentsMargins(8, 8, 8, 6)
+        ol.setSpacing(2)
+        self.lbl_ops_title = Label("", size=9.5)
+        self.btn_ops_link = Button("", command=self.open_records_viewer, role="link")
+        ol.addLayout(hbox(self.lbl_ops_title, None, self.btn_ops_link))
+        self.ops_list = OpsList()
+        ol.addWidget(self.ops_list, 1)
+        self.lbl_ops_empty = Label("", size=8, bold=False, color_key="muted", align=Qt.AlignCenter, wrap=True)
+        ol.addWidget(self.lbl_ops_empty)
+        self.card_ops.setFixedWidth(196)
+
+        grid.addLayout(main_col, 0, 0)
+        grid.addWidget(self.card_ops, 0, 1)
+        grid.setColumnStretch(0, 1)
+        root.addWidget(self.body_full, 1)
+
+        # ===== الشريط السفلي: مجموعات معنونة =====
+        self.b_bar = QWidget()
+        bl = QVBoxLayout(self.b_bar)
+        bl.setContentsMargins(10, 7, 10, 0)
+        bl.setSpacing(0)
+        bar_card = Card()
+        bcl = QHBoxLayout(bar_card)
+        bcl.setContentsMargins(10, 5, 10, 6)
+        bcl.setSpacing(18)
+        bcl.addStretch(1)
+        self._bar_captions = []  # (label, ar, en)
+
+        def _mk_group(cap_ar, cap_en, buttons):
+            col = QVBoxLayout()
+            col.setSpacing(3)
+            cap = Label(T2(cap_ar, cap_en), size=7.2, color_key="muted")
+            self._bar_captions.append((cap, cap_ar, cap_en))
+            col.addWidget(cap)
+            row = QHBoxLayout()
+            row.setSpacing(5)
+            for b in buttons:
+                row.addWidget(b)
+            col.addLayout(row)
+            bcl.addLayout(col)
+
+        self.btn_view_rec = Button("", command=self.open_records_viewer, role="soft")
+        self.btn_arch_full = Button("", command=self.open_archive_history, role="soft")
+        self.btn_chrome = Button("", command=self.open_chrome_browser)
+        self.btn_pdf_export = Button("", command=self.export_pdf_summary)
+        self.btn_excel = Button("", command=self.open_excel)
+        self.btn_print_slip = Button("", command=self.print_slip)
+        _mk_group("العرض", "View", [self.btn_view_rec, self.btn_arch_full, self.btn_chrome])
+        _mk_group("التقارير", "Reports", [self.btn_pdf_export, self.btn_excel])
+        _mk_group("الطباعة", "Print", [self.btn_print_slip])
+        bcl.addStretch(1)
+        # النسخة دي: زر سجل الأرشيف والإكسيل للمشرف، وبوابة المرور بعد الدخول (unlock_full_console)
+        self.btn_arch_full.hide()
+        self.btn_excel.hide()
+        self.btn_chrome.hide()
+        bl.addWidget(bar_card)
+        # عدادات شريط الحالة (موجودة زي الكونسول بس مش ظاهرة فيه)
+        self.lbl_status_count = Label("")
+        self.lbl_status_sum = Label("")
+        self.lbl_status_count.hide()
+        self.lbl_status_sum.hide()
+        self.lbl_foot = Label(FOOT_TEXT, size=7.2, color_key="muted", align=Qt.AlignCenter)
+        bl.addWidget(self.lbl_foot, 0, Qt.AlignHCenter)
+        bl.addSpacing(3)
+        root.addWidget(self.b_bar)
+        self._status_count_val = 0
+        self._status_total_val = 0.0
+        self._render_status_bar(0, 0.0)
+        self.body_full.hide()
+        self.b_bar.hide()
+
+    def _install_tooltips(self):
+        tips = {
+            "btn_run": T2("تشغيل الفحص وتجميع الإيصالات (Ctrl+R)", "Run scan & collect receipts (Ctrl+R)"),
+            "btn_manual": T2("إدخال يدوي (F2)", "Manual entry (F2)"),
+            "btn_print_slip": T2("إيصال تصوير (F3)", "Photocopy slip (F3)"),
+            "btn_cash": T2("حاسبة الكاش (F4)", "Cash calculator (F4)"),
+            "btn_summary_reopen": T2("إعادة فتح ملخص الفحص", "Reopen scan summary"),
+            "btn_archive_downloads": T2("أرشفة الجهاز", "Archive this device"),
+            "btn_mini_reprint": T2("إعادة طباعة آخر إيصال (في حالة نفاد الورق أو انحشاره)", "Reprint the last receipt (if paper ran out or jammed)"),
+            "btn_reset": T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)"),
+            "btn_view_rec": T2("عرض السجلات", "Records viewer"),
+            "btn_pdf_export": T2("تصدير ملخص PDF", "Export PDF summary"),
+            "btn_excel": T2("فتح ملف الإكسيل", "Open Excel file"),
+            "btn_arch_full": T2("سجل الأرشيف الكامل (كل الأيام)", "Full archive history (all days)"),
+            "btn_chrome": T2("فتح المتصفح", "Open browser"),
+            "btn_today": T2("تاريخ النهارده", "Set date to today"),
+            "btn_yesterday": T2("تاريخ امبارح", "Set date to yesterday"),
+            "btn_browse": T2("اختيار مجلد الإيصالات", "Choose receipts folder"),
+            "btn_open_f": T2("فتح المجلد", "Open folder"),
+            "btn_pos_check": T2("مطابقة مع إجمالي POS", "Compare with POS total"),
+            "btn_lang": T2("تغيير اللغة", "Switch language"),
+            "btn_mute": T2("كتم / تشغيل الصوت", "Mute / unmute sound"),
+        }
+        for name, txt in tips.items():
+            w = getattr(self, name, None)
+            if w is not None:
+                w.setToolTip(txt)
+
+    # ---------- الثيم ----------
+    def _theme_picked(self, label):
+        for key, (ar, en) in ui.THEME_LABELS.items():
+            if label in (ar, en):
+                self.on_theme_select(key)
+                return
+
+    def on_theme_select(self, selected_theme):
+        self.current_theme_name = selected_theme
+        self.apply_theme(selected_theme)
+        _save_app_prefs(theme=selected_theme)
+
+    def apply_theme(self, name):
+        ThemeState.key = name if name in PAL else "dark"
+        self.current_theme_name = ThemeState.key
+        app = QApplication.instance()
+        app.setStyleSheet(ui.build_qss(ThemeState.key))
+        for b in list(ui._ALL_BUTTONS):
+            try: b.refresh_icon()
+            except RuntimeError: pass
+        for l in list(ui._ALL_LABELS):
+            try: l._restyle()
+            except RuntimeError: pass
+        try: self.f_role_btn.restyle()
+        except Exception: pass
+        p = PAL[ThemeState.key]
+        self.lbl_logo.setText(f'<span style="font-weight:900; font-size:15pt; letter-spacing:1px; color:{p["acc"]}">A2R</span>'
+                              f'<span style="font-size:7.5pt; font-weight:600; color:{p["muted"]}">&nbsp;{APP_VERSION}</span>')
+        self._fill_theme_combo()
+        self.ops_list.viewport().update()
+        self.update_toggle_appearance()
+        self._refresh_mini_archive_label()
+
+    def _fill_theme_combo(self):
+        labs = [ui.THEME_LABELS[k][0 if self.current_lang == "ar" else 1] for k in ("light", "dark")]
+        self.cb_theme.configure(values=labs)
+        self.cb_theme.set(ui.THEME_LABELS[ThemeState.key][0 if self.current_lang == "ar" else 1])
+
+    # ---------- اللغة ----------
+    def apply_language(self, lang):
+        core.ConsoleLogic.apply_language(self, lang)
+        rtl = (lang == "ar")
+        QApplication.instance().setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
+        self.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
+        self.e_path.setLayoutDirection(Qt.LeftToRight)
+        # عنوان «مسار المجلد» و«التاريخ» بنفس العرض عشان الخانات تيجي تحت بعض
+        fm = QFontMetrics(self.lbl_folder.lbl.font())
+        lw = max(fm.horizontalAdvance(self.lbl_folder.lbl.text()), fm.horizontalAdvance(self.lbl_d.lbl.text())) + 10
+        self.lbl_folder.setFixedWidth(lw)
+        self.lbl_d.setFixedWidth(lw)
+        self.lbl_ops_title.configure(text=T2("آخر العمليات", "Recent"))
+        self.btn_ops_link.setText(T2("عرض السجلات ←", "View records →"))
+        self._fill_theme_combo()
+        self._install_tooltips()
+        self._ops_sig = None
+        self._refresh_ops()
+        try:
+            acts = self._tray_menu.actions()
+            acts[0].setText(tr("tray_open")); acts[1].setText(tr("tray_console")); acts[3].setText(tr("tray_exit"))
+        except Exception:
+            pass
+
+    # ---------- «آخر العمليات» ----------
+    def _refresh_ops(self):
+        recs = self.last_detailed_records or []
+        sig = (id(recs), len(recs), sum(1 for r in recs if r.get("is_void")), self.current_lang,
+               tuple(r.get("kind", "") for r in recs[-3:]))
+        if sig == self._ops_sig:
+            return
+        self._ops_sig = sig
+        rows = ops_rows_from_records(recs)
+        self.ops_list.set_rows(rows)
+        self.lbl_ops_empty.configure(text="" if rows else T2("لسه مفيش عمليات النهارده", "No operations yet today"))
+        self.lbl_ops_empty.setVisible(not rows)
+
+    # =====================================================================
+    #                           النوافذ الفرعية
+    # =====================================================================
+    def fix_printer_paper_action(self):
+        """بيفتح نافذة اختيار مقاس الطباعة. مفيش أي تعديل في إعدادات الويندوز/الطابعة، فبيشتغل لأي يوزر عادي."""
+        old = getattr(self, "_paper_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("fix_printer_paper_action#0", _e)
+
+        self._cancel_auto_minimize()
+        t = THEMES[self.current_theme_name]
+        win = Window(self, title=T2("مقاس الطباعة", "Print Size"))
+        self._paper_win = win
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(16, 12, 16, 10)
+        lay.setSpacing(6)
+        lay.addWidget(Label(T2("مقاس ورقة الطباعة (مم)", "Paper size (mm)"), size=8.5))
+        f_pre = QHBoxLayout(); f_pre.setSpacing(6)
+        lay.addLayout(f_pre)
+        e_w = Entry(justify="center"); e_w.setFixedWidth(64); e_w.setLayoutDirection(Qt.LeftToRight)
+        e_h = Entry(justify="center"); e_h.setFixedWidth(64); e_h.setLayoutDirection(Qt.LeftToRight)
+        lay.addLayout(hbox(Label(T2("العرض", "Width"), size=8.5), e_w, 6, Label(T2("الطول", "Height"), size=8.5), e_h, None))
+
+        def _fill(w, h):
+            e_w.delete(0, "end"); e_w.insert(0, _fmt_mm(w))
+            e_h.delete(0, "end"); e_h.insert(0, _fmt_mm(h))
+
+        _fill(*core._PRINT_PAPER_MM)
+        sel = {"name": core._PRINT_PAPER_NAME}
+        papers_map = {}
+
+        def _preset(a, b):
+            sel["name"] = ""
+            for lab, (nm, pw, ph) in papers_map.items():
+                if abs(pw - a) <= 3 and abs(ph - b) <= 3:
+                    sel["name"] = nm
+                    try: cb_papers.set(lab)
+                    except Exception as _e: _log_silent("fp_preset#cb", _e)
+                    break
+            _fill(a, b)
+        for (pw, ph) in PRINT_PAPER_PRESETS_MM:
+            b = Button(f"{_fmt_mm(pw)} × {_fmt_mm(ph)}", command=lambda a=pw, b=ph: _preset(a, b), role="soft")
+            b.setFixedWidth(90)
+            f_pre.addWidget(b)
+        f_pre.addStretch(1)
+
+        lay.addWidget(Label(T2("مقاسات الطابعة الافتراضية", "Default printer paper sizes"), size=8.5))
+        cb_papers = Combo(readonly=True, values=[T2("... بقرا المقاسات من الطابعة", "... reading printer sizes")])
+        cb_papers.set(T2("... بقرا المقاسات من الطابعة", "... reading printer sizes"))
+        lay.addWidget(cb_papers)
+
+        def _on_pick(choice):
+            it = papers_map.get(choice)
+            if it:
+                sel["name"] = it[0]
+                _fill(it[1], it[2])
+        cb_papers.configure(command=_on_pick)
+
+        def _manual_edit(event=None):
+            sel["name"] = ""      # كتبت مقاس بإيدك: مفيش اسم ورق من الدرايفر
+        e_w.bind("<KeyRelease>", _manual_edit)
+        e_h.bind("<KeyRelease>", _manual_edit)
+
+        def _load_papers():
+            prn, items = list_printer_papers()
+            def _apply():
+                try:
+                    if not win.winfo_exists():
+                        return
+                    if not items:
+                        cb_papers.configure(values=[T2("مقدرتش أقرا مقاسات الطابعة", "Could not read printer sizes")])
+                        cb_papers.set(T2("مقدرتش أقرا مقاسات الطابعة", "Could not read printer sizes"))
+                        return
+                    labels = []
+                    for (nm, pw, ph) in items:
+                        lab = f"{nm}  ({_fmt_mm(pw)}×{_fmt_mm(ph)})"
+                        papers_map[lab] = (nm, pw, ph)
+                        labels.append(lab)
+                    cb_papers.configure(values=labels)
+                    cur = next((l for l, v in papers_map.items() if v[0] == sel["name"]), "")
+                    cb_papers.set(cur or (prn or T2("اختار مقاس", "Pick a size")))
+                except Exception as _e: _log_silent("fix_printer_paper_action#4", _e)
+            self.run_on_main(_apply)
+        threading.Thread(target=_load_papers, daemon=True).start()
+
+        lbl_err = Label("", size=7.8, color_key="bad", wrap=True)
+        lay.addWidget(lbl_err)
+        lay.addWidget(Label(T2("المقاس بيتحفظ لليوزر الحالي وبيتطبّق على أي طباعة جاية.",
+                               "Saved for the current user and used for every next print."), size=7.8, bold=False, wrap=True))
+
+        def _close():
+            try: win.destroy()
+            except Exception as _e: _log_silent("fix_printer_paper_action#2", _e)
+            if getattr(self, "is_mini_mode", False):
+                self._schedule_auto_minimize(5000)
+
+        def _save(event=None):
+            try:
+                if btn_save.cget("state") == "disabled": return
+            except Exception as _e: _log_silent("fix_printer_paper_action#7", _e)
+            try:
+                w = float(e_w.get().strip().replace(",", "."))
+                h = float(e_h.get().strip().replace(",", "."))
+            except Exception:
+                lbl_err.configure(text=T2("اكتب أرقام صحيحة للعرض والطول", "Enter valid numbers for width and height"))
+                return
+            if not (20 <= w <= 300 and 20 <= h <= 600):
+                lbl_err.configure(text=T2("المقاس خارج المدى المسموح (العرض 20-300، الطول 20-600)",
+                                          "Size out of range (width 20-300, height 20-600)"))
+                return
+            saved = save_print_paper(w, h, sel["name"])
+            self.btn_fix_printer.configure(text=self._paper_btn_text())
+            try: btn_save.configure(state="disabled", text=T2("⏳ بضبط إعدادات الطابعة...", "⏳ Setting printer..."))
+            except Exception as _e: _log_silent("fix_printer_paper_action#5", _e)
+
+            def _apply_printer():
+                res = set_default_printer_paper(w, h)
+                def _done():
+                    try:
+                        play_sound_matched()
+                        if res.get("ok"):
+                            aw, ah = res.get("w", 0), res.get("h", 0)
+                            exact = abs(aw - w) <= 2 and abs(ah - h) <= 2
+                            if exact:
+                                msg = T2(f"تم ضبط الطابعة الافتراضية ({res.get('printer','')}) على {_fmt_mm(w)}×{_fmt_mm(h)} مم.",
+                                         f"Default printer ({res.get('printer','')}) set to {_fmt_mm(w)}x{_fmt_mm(h)} mm.")
+                                messagebox.showinfo(tr("done"), msg, parent=win)
+                            else:
+                                msg = T2(f"الطابعة ({res.get('printer','')}) قبلت مقاس مختلف: {_fmt_mm(aw)}×{_fmt_mm(ah)} مم بدل {_fmt_mm(w)}×{_fmt_mm(h)}.\n"
+                                         f"الدرايفر مش بيدعم المقاس ده بالظبط.",
+                                         f"Printer ({res.get('printer','')}) accepted a different size: {_fmt_mm(aw)}x{_fmt_mm(ah)} mm instead of {_fmt_mm(w)}x{_fmt_mm(h)}.\n"
+                                         f"The driver does not support this exact size.")
+                                messagebox.showwarning(tr("done"), msg, parent=win)
+                        else:
+                            msg = T2("المقاس اتحفظ في البرنامج لكن معرفتش أغيّر إعدادات الطابعة الافتراضية.\n"
+                                     "اتأكد إن فيه طابعة افتراضية متوصلة، والتفاصيل في app_log.txt.",
+                                     "Size saved in the app, but the default printer settings could not be changed.\n"
+                                     "Make sure a default printer is connected. Details in app_log.txt.")
+                            messagebox.showwarning(tr("done"), msg, parent=win)
+                    except Exception as _e: _log_silent("fix_printer_paper_action#6", _e)
+                    _close()
+                self.run_on_main(_done)
+            threading.Thread(target=_apply_printer, daemon=True).start()
+
+        def _test_print():
+            try:
+                w = float(e_w.get().strip().replace(",", "."))
+                h = float(e_h.get().strip().replace(",", "."))
+            except Exception:
+                lbl_err.configure(text=T2("اكتب أرقام صحيحة للعرض والطول", "Enter valid numbers for width and height"))
+                return
+            if not (20 <= w <= 300 and 20 <= h <= 600):
+                lbl_err.configure(text=T2("المقاس خارج المدى المسموح", "Size out of range"))
+                return
+            save_print_paper(w, h, sel["name"])
+            self.btn_fix_printer.configure(text=self._paper_btn_text())
+            try: btn_test.configure(state="disabled", text=T2("⏳ جاري الطباعة...", "⏳ Printing..."))
+            except Exception as _e: _log_silent("fp_test#dis", _e)
+
+            def _bg():
+                ok = False
+                try:
+                    os.makedirs(PRINT_TEMP_DIR, exist_ok=True)
+                    tp = os.path.join(PRINT_TEMP_DIR, "a2r_test_size.pdf")
+                    if create_test_print_pdf(tp, w, h):
+                        ok = self.send_to_thermal_printer_57x90(tp, is_test=True)
+                except Exception as e:
+                    log_exception("test_print", e)
+                def _fin():
+                    try:
+                        if win.winfo_exists():
+                            btn_test.configure(state="normal", text=T2("🖨️ طباعة تجريبية", "🖨️ Test Print"))
+                            if ok:
+                                play_sound_matched()
+                                lbl_err.configure(text=T2("✓ تم إرسال ورقة الاختبار للطابعة", "✓ Test page sent to printer"), text_color=t["success"])
+                            else:
+                                lbl_err.configure(text=T2("تعذرت الطباعة — تأكد من الطابعة", "Print failed — check printer"), text_color=t["danger"])
+                    except Exception as _e: _log_silent("fp_test#fin", _e)
+                self.run_on_main(_fin)
+            threading.Thread(target=_bg, daemon=True).start()
+
+        btn_test = Button(T2("🖨️ طباعة تجريبية", "🖨️ Test Print"), command=_test_print, role="soft")
+        btn_drv = Button(T2("⚙️ إعدادات الدرايفر", "⚙️ Driver Settings"),
+                         command=lambda: threading.Thread(target=open_default_printer_preferences, daemon=True).start())
+        row = QHBoxLayout(); row.setSpacing(8)
+        row.addWidget(btn_test, 1); row.addWidget(btn_drv, 1)
+        lay.addLayout(row)
+        btn_save = Button(T2("حفظ وتطبيق", "Save & Apply"), command=_save, role="primary", big=True)
+        lay.addWidget(btn_save)
+        win.bind("<Return>", _save)
+        win.bind("<Escape>", lambda e: _close())
+        win.protocol("WM_DELETE_WINDOW", _close)
+        win.show_centered(self, 365, 340, focus=e_w)
+
+    def open_downloads_archiver_dialog(self):
+        """زر الأرشفة (متاح لأي مستخدم): بيأرشف الجهاز ده لو لسه ما اتأرشفش النهارده فقط."""
+        try:
+            old = getattr(self, "_user_archive_win", None)
+            if old is not None:
+                try:
+                    if old.winfo_exists():
+                        old.lift(); old.focus_force()
+                        return
+                except Exception as _e: _log_silent("user_archive#exists", _e)
+
+            t = THEMES[self.current_theme_name]
+            folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+            _has_hub = getattr(self, "btn_arch_full", None) is not None
+            _show_hist = not (getattr(self, "is_supervisor", False) and _has_hub)
+            win = Window(self, title=f"{tr('clean_downloads')} - A2R {APP_VERSION}")
+            self._user_archive_win = win
+            lay = QVBoxLayout(win)
+            lay.setContentsMargins(16, 12, 16, 10)
+            lay.setSpacing(7)
+            lay.addWidget(Label(T2("📦 أرشفة الجهاز", "📦 Device Archive"), size=11.5, color_key="acc"), 0, Qt.AlignHCenter)
+            lay.addWidget(Label(T2("بتنقل إيصالات الأيام السابقة للأرشيف وتعمل إكسيل وملخص (عدد المعاملات والإجمالي) لكل يوم",
+                                   "Moves previous days' receipts to the archive and builds an Excel + summary (count & total) per day"),
+                                size=7.8, bold=False, color_key="muted", wrap=True, align=Qt.AlignCenter))
+            card = Card()
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 8, 12, 10)
+            cl.setSpacing(2)
+            cl.addWidget(Label(T2("المجلد:", "Folder:"), size=8.5))
+            lf = Label(folder or "-", size=7.8, bold=False, color_key="muted", wrap=True)
+            lf.lbl.setLayoutDirection(Qt.LeftToRight)
+            cl.addWidget(lf)
+            lbl_state = Label("", size=10, wrap=True, align=Qt.AlignCenter)
+            cl.addSpacing(6)
+            cl.addWidget(lbl_state)
+            lay.addWidget(card)
+            p_bar = Progress(); p_bar.set(0)
+            p_lbl = Label("0%", size=8.5); p_lbl.setFixedWidth(40)
+            lay.addLayout(hbox(p_bar, p_lbl, stretch_at=0, spacing=8))
+            s_lbl = Label("", size=7.8, bold=False, wrap=True, align=Qt.AlignCenter)
+            lay.addWidget(s_lbl)
+
+            st = {"busy": False}
+
+            def _alive():
+                try: return bool(win.winfo_exists())
+                except Exception: return False
+
+            def refresh_state():
+                if not _alive(): return
+                auto_running = bool(getattr(self, "_auto_archive_running", False))
+                if st["busy"] or auto_running:
+                    lbl_state.configure(text=T2("⏳ جاري الأرشفة...", "⏳ Archiving..."), text_color=t["warning"])
+                    btn_go.configure(state="disabled", text=T2("جاري الأرشفة...", "Archiving..."))
+                    if auto_running and not st["busy"]:
+                        win.after(1500, refresh_state)
+                elif self._archive_done_today():
+                    tm = self._archive_done_time()
+                    lbl_state.configure(
+                        text=T2("✓ الجهاز ده اتأرشف النهارده", "✓ This device is already archived today") + (f"  ({tm})" if tm else ""),
+                        text_color=t["success"])
+                    btn_go.configure(state="disabled", text=T2("تمت الأرشفة ✓", "Archived ✓"))
+                else:
+                    lbl_state.configure(text=T2("الجهاز ده لسه ما اتأرشفش النهارده", "This device has not been archived today"),
+                                        text_color=t["warning"])
+                    btn_go.configure(state="normal", text=T2("🗄️ أرشفة الآن", "🗄️ Archive now"))
+
+            def _start():
+                if st["busy"] or getattr(self, "_auto_archive_running", False): return refresh_state()
+                if self._archive_done_today(): return refresh_state()
+                if not folder or not os.path.isdir(folder):
+                    messagebox.showerror("Error", tr("dir_missing"), parent=win)
+                    return
+                st["busy"] = True
+                p_bar.set(0); p_lbl.configure(text="0%")
+                refresh_state()
+
+                def ui_(fn):
+                    def _run():
+                        if _alive():
+                            try: fn()
+                            except Exception as _e: _log_silent("user_archive#ui", _e)
+                    self.run_on_main(_run)
+
+                def prog(i, n, fname):
+                    pct = int((i / n) * 100) if n else 100
+                    ui_(lambda: [p_bar.set(pct / 100.0), p_lbl.configure(text=f"{pct}%"),
+                                 s_lbl.configure(text=T2(f"جاري نقل: {fname}", f"Moving: {fname}"))])
+
+                def stage(i, n, name):
+                    pct = int(i / max(1, n) * 100)
+                    ui_(lambda: [p_bar.set(i / max(1, n)), p_lbl.configure(text=f"{pct}%"),
+                                 s_lbl.configure(text=T2(f"جاري تحديث ملخص وإكسيل يوم {name}  ({i}/{n})",
+                                                         f"Updating summary & Excel for day {name}  ({i}/{n})"))])
+
+                def work():
+                    moved, ok = None, False
+                    try:
+                        moved = self._run_archive_sweep(folder, prog, stage)
+                        if moved is not None:
+                            self._mark_archive_done_today()
+                            self._start_archive_maintenance(folder)
+                            ok = True
+                    except Exception as e:
+                        log_exception("user_archive_worker", e)
+                    st["busy"] = False
+
+                    def fin():
+                        if ok:
+                            p_bar.set(1.0); p_lbl.configure(text="100%")
+                            s_lbl.configure(text=T2(f"✓ تمت الأرشفة — {moved or 0} ملف اتنقل", f"✓ Done — {moved or 0} file(s) archived"))
+                            play_sound_matched()
+                            def _auto_close():
+                                if _alive():
+                                    try: win.destroy()
+                                    except Exception as _e: _log_silent("user_archive#autoclose", _e)
+                            try: win.after(2500, _auto_close)
+                            except Exception as _e: _log_silent("user_archive#autoclose_sched", _e)
+                        elif moved is None and not ok:
+                            s_lbl.configure(text=T2("فيه أرشفة شغالة حالياً، جرّب بعد شوية.", "Another archive is running, try again shortly."))
+                        else:
+                            s_lbl.configure(text=T2("حصل خطأ أثناء الأرشفة (متسجّل في app_log.txt).", "Archive failed (see app_log.txt)."))
+                        refresh_state()
+                    ui_(fin)
+
+                threading.Thread(target=work, daemon=True).start()
+
+            btn_go = Button("", command=_start, role="primary", big=True)
+            lay.addWidget(btn_go)
+            if _show_hist:
+                lay.addWidget(Button(T2("📚 سجل الأرشيف", "📚 Archive History"), command=self.open_archive_history, big=True))
+            lay.addWidget(Label((T2("المشرف: كل الأيام بتفاصيلها • المستخدم: آخر 7 أيام للقراءة فقط",
+                                    "Supervisor: all days in full • User: last 7 days, read-only") if _show_hist else
+                                 T2("📚 سجل الأرشيف متاح من زر سجل الأرشيف في الشريط السفلي",
+                                    "📚 Archive history is available from the Archive History button below")),
+                                size=7.6, bold=False, color_key="muted", wrap=True, align=Qt.AlignCenter))
+            refresh_state()
+            win.show_centered(self, 440, 300)
+        except Exception as e: log_exception("open_archive_dialog", e)
+
+    # ---------- سجل الأرشيف ----------
+    def open_archive_history(self):
+        """سجل الأرشيف: كل الأيام، واختيار يوم بيعرض كل معاملاته في نفس النافذة.
+        المشرف: كل الأدوات. اليوزر: قراءة فقط لآخر USER_DAYS أيام."""
+        is_admin = bool(getattr(self, "is_supervisor", False))
+        USER_DAYS = 7
+        _old = getattr(self, "_arch_win", None)
+        try:
+            if _old is not None and _old.winfo_exists():
+                if getattr(self, "_arch_win_admin", None) == is_admin:
+                    try:
+                        if _old.state() == "iconic": _old.deiconify()
+                    except Exception as _e: _log_silent("open_archive_history#restore", _e)
+                    _old.lift(); _old.focus_force()
+                    return
+                _old.destroy()
+        except Exception as _e: _log_silent("open_archive_history#dup", _e)
+        folder = self.get_clean_path() or DEFAULT_RECEIPTS_DIR
+        if not folder or not os.path.isdir(folder):
+            messagebox.showerror("Error", tr("dir_missing"))
+            return
+        cutoff_iso = "" if is_admin else (datetime.date.today() - datetime.timedelta(days=USER_DAYS)).isoformat()
+
+        t = THEMES[self.current_theme_name]
+        tagc = TAG_COLORS[t["mode"]]
+        win = Window(self, title=T2("📚 سجل الأرشيف", "📚 Archive History"), resizable=True)
+        self._arch_win, self._arch_win_admin = win, is_admin
+        _restore_geom(win, "archive_history")
+        ALL = T2("الكل", "All")
+        st = {"stats": [], "debounce": None, "iso": None, "recs": [], "recs_iso": None,
+              "load_id": 0, "cache": {}, "sel_job": None}
+
+        outer = QVBoxLayout(win)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(6)
+
+        # ---------- شريط الحالة والأدوات ----------
+        bar = Card()
+        bar_l = QHBoxLayout(bar)
+        bar_l.setContentsMargins(12, 6, 8, 6)
+        bar_l.setSpacing(6)
+        status_lbl = Label("", size=8.5, color_key="acc")
+        bar_l.addWidget(status_lbl, 1)
+        outer.addWidget(bar)
+
+        def _set_status(txt):
+            try:
+                if win.winfo_exists(): status_lbl.configure(text=txt)
+            except Exception as _e: _log_silent("_set_status#1", _e)
+
+        def run_maintenance(manual=False, light=False):
+            def prog(i, n):
+                self.after(0, lambda: _set_status(T2(f"جاري فهرسة الأرشيف... {i}/{n}", f"Indexing archive... {i}/{n}")))
+            def work():
+                res = archive_maintenance(folder, prog, full=not light)
+                def fin():
+                    if not win.winfo_exists(): return
+                    if res is None:
+                        _set_status("" if light else T2("عملية الفهرسة/النسخ شغالة بالفعل، استنى شوية.", "Maintenance already running."))
+                    elif light:
+                        _set_status(T2(f"جاهز ✓ — جديد: {res[0]}", f"Ready ✓ — new: {res[0]}"))
+                    else:
+                        _set_status(T2(f"تم ✓ — جديد: {res[0]} | منسوخ للنسخة الاحتياطية: {res[1]}",
+                                       f"Done ✓ — new: {res[0]} | backed up: {res[1]}"))
+                    st["cache"].clear()
+                    load_days()
+                self.after(0, fin)
+            _set_status(T2("جاري الفحص...", "Scanning..."))
+            threading.Thread(target=work, daemon=True).start()
+
+        def open_backup_folder():
+            if not is_admin: return
+            if os.path.isdir(ARCHIVE_BACKUP_DIR): _startfile(ARCHIVE_BACKUP_DIR)
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد نسخة احتياطية بعد. اضغط (تحديث + نسخ).", "No backup yet. Press Refresh + Backup."), parent=win)
+
+        rb = {"running": False, "btn": None}
+
+        def _set_rearch_btn(running):
+            b = rb.get("btn")
+            if b is None: return
+            try:
+                b.configure(state="disabled" if running else "normal",
+                            text=T2("⏳ جاري إعادة الأرشفة...", "⏳ Re-archiving...") if running
+                            else T2("♻️ إعادة أرشفة الكل", "♻️ Re-archive all"))
+            except Exception as _e: _log_silent("_set_rearch_btn#1", _e)
+
+        def run_rearchive(days, ask=True, silent=False):
+            if rb["running"]: return
+            if days is not None and not days:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("مفيش أيام مطابقة.", "No matching days."), parent=win)
+                return
+            what = T2("كل الأيام", "all days") if days is None else T2(f"{len(days)} يوم", f"{len(days)} day(s)")
+            if ask and not messagebox.askyesno(
+                    T2("إعادة الأرشفة", "Re-archive"),
+                    T2(f"هتتعمل إعادة قراءة لإيصالات {what} وإعادة بناء إجمالي اليوم وإيصال السمري وإكسيل اليوم.\n"
+                       "الإيصالات نفسها مش بتتغير ولا بتتمسح. تكمّل؟",
+                       f"Receipts of {what} will be re-read and the day total, summary receipt and day Excel rebuilt.\n"
+                       "The receipts themselves are not changed or deleted. Continue?"), parent=win):
+                return
+            rb["running"] = True
+            if silent: _set_rearch_btn(True)
+            def prog(i, n):
+                self.after(0, lambda: _set_status(T2(f"جاري إعادة قراءة الإيصالات... {i}/{n}", f"Re-reading receipts... {i}/{n}")))
+            def stage(i, n, iso):
+                self.after(0, lambda: _set_status(T2(f"جاري إعادة بناء الملخصات... {i}/{n} ({iso})", f"Rebuilding summaries... {i}/{n} ({iso})")))
+            def work():
+                try: res = self._rearchive_days(folder, days, None if silent else prog, None if silent else stage)
+                except Exception as e:
+                    log_exception("rearchive", e)
+                    res = {"error": True}
+                def fin():
+                    rb["running"] = False
+                    if silent:
+                        try: _set_rearch_btn(False) if win.winfo_exists() else None
+                        except Exception as _e: _log_silent("run_rearchive#btn", _e)
+                        if res is None: _msg = T2("فهرسة تانية شغالة، جرّب بعد شوية.", "Another indexing job is running, try again shortly.")
+                        elif res.get("error"): _msg = T2("حصل خطأ أثناء إعادة الأرشفة (راجع ملف اللوج).", "Error while re-archiving (see log).")
+                        else: _msg = T2(f"تمت إعادة أرشفة كل الأيام ✓ ({res['rebuilt']} يوم)", f"All days re-archived ✓ ({res['rebuilt']} days)")
+                        self._tray_notify(_msg)
+                        if getattr(self, "tray_icon", None) is None:
+                            messagebox.showinfo(T2("إعادة الأرشفة", "Re-archive"), _msg, parent=self)
+                    if not win.winfo_exists(): return
+                    st["cache"].clear()
+                    load_days()
+                    if st["iso"] and day_tree.exists(st["iso"]): show_day(st["iso"])
+                    if silent: return
+                    if res is None:
+                        _set_status(T2("فهرسة تانية شغالة، جرّب بعد شوية.", "Another indexing job is running, try again shortly."))
+                    elif res.get("error"):
+                        _set_status(T2("حصل خطأ أثناء إعادة الأرشفة (راجع ملف اللوج).", "Error while re-archiving (see log)."))
+                    else:
+                        _set_status(T2(f"تمت إعادة الأرشفة ✓ — أيام اتبنى لها ملخص: {res['rebuilt']} | إيصالات اتقرت: {res['read']}",
+                                       f"Re-archive done ✓ — days rebuilt: {res['rebuilt']} | receipts read: {res['read']}"))
+                        warn = []
+                        if res.get("zero_amount"):
+                            warn.append(T2(f"• {res['zero_amount']} إيصال لسه مبلغه صفر بعد إعادة القراءة (القارئ مش قادر يلقط المبلغ منه).",
+                                           f"• {res['zero_amount']} receipt(s) still have a zero amount after re-reading."))
+                        if res.get("unread"):
+                            warn.append(T2(f"• {res['unread']} ملف مقدرش يتقري كإيصال (أسماء أول الملفات في ملف اللوج).",
+                                           f"• {res['unread']} file(s) could not be read as receipts (first names are in the log)."))
+                        if warn:
+                            messagebox.showwarning(T2("نتيجة إعادة الأرشفة", "Re-archive result"), "\n".join(warn), parent=win)
+                self.after(0, fin)
+            _set_status(T2("جاري إعادة الأرشفة...", "Re-archiving..."))
+            threading.Thread(target=work, daemon=True).start()
+
+        def open_rearchive():
+            if rb["running"]: return
+            dlg = Window(win, title=T2("♻️ إعادة الأرشفة", "♻️ Re-archive"), modal=True)
+            dl = QVBoxLayout(dlg)
+            dl.setContentsMargins(16, 14, 16, 12)
+            dl.setSpacing(6)
+            dl.addWidget(Label(T2("إعادة قراءة الإيصالات من الأول وإعادة بناء إجمالي اليوم وإيصال السمري وإكسيل اليوم. استخدمها لو في أيام إجماليها صفر أو فيها أخطاء.",
+                                  "Re-read receipts and rebuild day total, summary receipt and day Excel. Use it for days with a zero total or errors."),
+                               size=8.5, wrap=True))
+            grp = QButtonGroup(dlg)
+            opts = [("zero", T2("الأيام اللي إجماليها صفر أو فيها ناقص", "Days with a zero total or incomplete rows")),
+                    ("shown", T2("كل الأيام الظاهرة في القايمة (حسب الشهر/البحث)", "All days currently listed (month/search filter)")),
+                    ("all", T2("كل الأيام (ممكن ياخد وقت)", "All days (may take a while)"))]
+            radios = {}
+            for val, lab in opts:
+                rbtn = QRadioButton(lab)
+                grp.addButton(rbtn)
+                radios[val] = rbtn
+                dl.addWidget(rbtn)
+            radios["zero"].setChecked(True)
+
+            def go():
+                mode = next(k for k, r in radios.items() if r.isChecked())
+                if mode == "zero": days = sorted({x["day"] for x in st["stats"] if x["total"] <= 0 or x["missing"]})
+                elif mode == "shown": days = list(day_tree.get_children())
+                else: days = None
+                if mode == "all" and not messagebox.askyesno(
+                        T2("⚠️ تحذير: كل الأيام", "⚠️ Warning: all days"),
+                        T2("إنت اخترت إعادة أرشفة كل الأيام.\nده بيمسح الفهرس كله ويقرا كل الإيصالات من الأول وممكن ياخد وقت طويل لو الأرشيف كبير.\n"
+                           "الإيصالات نفسها مش بتتغير. متأكد؟",
+                           "You chose to re-archive ALL days.\nThis clears the whole index and re-reads every receipt, which can take a long time.\n"
+                           "The receipts themselves are not changed. Sure?"),
+                        icon="warning", default="no", parent=dlg):
+                    return
+                try: dlg.destroy()
+                except Exception as _e: _log_silent("open_rearchive#destroy", _e)
+                run_rearchive(days, ask=(mode != "all"))
+            dl.addSpacing(8)
+            dl.addWidget(Button(T2("▶ ابدأ", "▶ Start"), command=go, role="primary", big=True))
+            dlg.show_centered(win, 470, 260)
+
+        # ---------- ملء الشاشة / تكبير ----------
+        fs = {"on": False}
+        def toggle_fullscreen(event=None):
+            fs["on"] = not fs["on"]
+            try: win.showFullScreen() if fs["on"] else win.showNormal()
+            except Exception as _e: _log_silent("toggle_fullscreen#1", _e)
+        def exit_fullscreen(event=None):
+            if fs["on"]: toggle_fullscreen()
+            else: win.close()      # Esc تاني (أو أول مرة لو مش fullscreen) = يقفل السجل
+        win.bind("<F11>", toggle_fullscreen)
+        win.bind("<Escape>", exit_fullscreen)
+
+        def open_archive_root():
+            if not is_admin: return
+            root_ = ensure_archive_root(folder)
+            if os.path.isdir(root_): _startfile(root_)
+
+        def toggle_zoom():
+            try: win.state("normal" if win.state() == "zoomed" else "zoomed")
+            except Exception as _e: _log_silent("toggle_zoom#1", _e)
+
+        if is_admin:
+            def open_chrome_ext_folder():
+                if not is_admin: return
+                p_ext = ensure_chrome_extension_extracted()
+                if p_ext and os.path.isdir(p_ext): _startfile(p_ext)
+
+            def show_more():
+                items = [(T2("♻️ إعادة الأرشفة...", "♻️ Re-archive..."), open_rearchive), None,
+                         (T2("📂 فتح فولدر الأرشيف", "📂 Open archive folder"), open_archive_root),
+                         (T2("🗄️ فتح النسخة الاحتياطية", "🗄️ Open backup"), open_backup_folder),
+                         (T2("🧩 مجلد إضافة كروم", "🧩 Chrome extension folder"), open_chrome_ext_folder), None,
+                         (T2("⛶ ملء الشاشة (F11)", "⛶ Fullscreen (F11)"), toggle_fullscreen)]
+                popup_menu(win, items, btn_more.mapToGlobal(QPoint(0, btn_more.height())))
+            b_ref = Button(T2("🔄 تحديث + نسخ", "🔄 Refresh + Backup"), command=lambda: run_maintenance(True), role="primary")
+            b_zoom = Button(T2("🗖 تكبير", "🗖 Zoom"), command=toggle_zoom)
+            btn_more = Button(T2("⚙️ المزيد ▾", "⚙️ More ▾"), command=show_more)
+            for b in (b_ref, b_zoom, btn_more): bar_l.addWidget(b)
+        else:
+            bar_l.insertWidget(0, Label(T2(f"📅 عرض آخر {USER_DAYS} أيام", f"📅 Last {USER_DAYS} days"), size=8.5))
+            rb["btn"] = Button(T2("♻️ إعادة أرشفة الكل", "♻️ Re-archive all"),
+                               command=lambda: run_rearchive(None, ask=False, silent=True), role="primary")
+            bar_l.addWidget(rb["btn"])
+            bar_l.addWidget(Button(T2("🗖 تكبير", "🗖 Zoom"), command=toggle_zoom))
+
+        tv = QTabWidget()
+        outer.addWidget(tv, 1)
+        TAB_DAYS = T2("📅 الأيام والمعاملات", "📅 Days & Transactions")
+        TAB_SEARCH = T2("🔎 بحث عام في الأرشيف", "🔎 Global Search")
+        tab_days = QWidget(); tab_search = QWidget()
+        p_ = ThemeState.p()
+        tv.addTab(tab_days, make_icon("cal", p_["text"], 14), ui.split_icon(TAB_DAYS)[1])
+        tv.addTab(tab_search, make_icon("search", p_["text"], 14), ui.split_icon(TAB_SEARCH)[1])
+
+        def make_tree(columns, headers, widths):
+            tr_ = Tree(columns=columns, headers=headers, widths=widths)
+            for kind, (bg, fg) in tagc.items():
+                tr_.tag_configure(kind, background=bg, foreground=fg)
+            if ThemeState.key == "dark":
+                tr_.tag_configure("odd", background="#16202B", foreground=p_["text"])
+            return tr_
+
+        def card_wrap(w):
+            c = Card()
+            l = QVBoxLayout(c)
+            l.setContentsMargins(2, 2, 2, 2)
+            l.addWidget(w)
+            return c
+
+        # ================= تبويب الأيام والمعاملات =================
+        split = QSplitter(Qt.Horizontal)
+        tdl = QVBoxLayout(tab_days)
+        tdl.setContentsMargins(0, 6, 0, 0)
+        tdl.addWidget(split)
+        left = QWidget(); right = QWidget()
+        left.setMinimumWidth(300); right.setMinimumWidth(520)
+        split.addWidget(left); split.addWidget(right)
+        split.setStretchFactor(0, 0); split.setStretchFactor(1, 1)
+        split.setSizes([400, 700])
+        ll = QVBoxLayout(left); ll.setContentsMargins(0, 0, 4, 0); ll.setSpacing(4)
+        rl = QVBoxLayout(right); rl.setContentsMargins(4, 0, 0, 0); rl.setSpacing(4)
+
+        day_q = Entry(placeholder=T2("ابحث عن يوم (15-10-2026)", "Find a day (2026-10-15)"))
+        cb_month = Combo(values=[ALL], command=lambda v: apply_days())
+        cb_month.setFixedWidth(110)
+        cb_month.set(ALL)
+
+        def clear_filters():
+            day_q.delete(0, "end")
+            cb_month.set(ALL)
+            apply_days()
+        b_clr = Button("✖", command=clear_filters); b_clr.setFixedWidth(34)
+        ll.addLayout(hbox(day_q, cb_month, b_clr, stretch_at=0, spacing=4))
+
+        day_cols = ("date", "ops", "total")
+        day_hdr = {"date": T2("التاريخ", "Date"), "ops": T2("المعاملات", "Tx"), "total": T2("إجمالي المبلغ", "Total")}
+        day_tree = make_tree(day_cols, day_hdr, {"date": 120, "ops": 80, "total": 150})
+        ll.addWidget(card_wrap(day_tree), 1)
+        sum_lbl = Label("", size=9, color_key="acc")
+        ll.addWidget(sum_lbl)
+        leg1 = QLabel(legend_html([(tagc["dup"][0], T2("يوم فيه مكرر", "has duplicates")),
+                                   (tagc["missing"][0], T2("يوم فيه ناقص", "has incomplete"))]))
+        leg1.setTextFormat(Qt.RichText)
+        ll.addWidget(leg1)
+
+        sort_state = {"col": "date", "rev": True}
+        def sort_days(col):
+            sort_state["rev"] = (not sort_state["rev"]) if sort_state["col"] == col else (col != "date" and True)
+            sort_state["col"] = col
+            apply_days()
+        for c in day_cols:
+            day_tree.heading(c, command=lambda c=c: sort_days(c))
+
+        def apply_days(*_):
+            q = day_q.get().strip()
+            mval = cb_month.get()
+            items = []
+            for s in st["stats"]:
+                day = s["day"]
+                if mval != ALL and not day.startswith(mval): continue
+                if q:
+                    y, m, d = day.split("-")
+                    hay = f"{day} {d}-{m}-{y} {d}/{m}/{y}"
+                    if q.replace("/", "-") not in hay.replace("/", "-"): continue
+                items.append(s)
+            key = sort_state["col"]
+            items.sort(key=lambda s: s["day"] if key == "date" else s[key], reverse=sort_state["rev"])
+            keep = st["iso"]
+            day_tree.blockSignals(True)
+            day_tree.delete(*day_tree.get_children())
+            for s in items:
+                y, m, d = s["day"].split("-")
+                tag = "dup" if s["dup"] else ("missing" if s["missing"] else ("odd" if len(day_tree.get_children()) % 2 else ""))
+                day_tree.insert("", "end", iid=s["day"], tags=(tag,) if tag else (),
+                                values=(f"{d}-{m}-{y}", f"{s['ops']:,}", f"{s['total']:,.2f}"))
+            if keep and day_tree.exists(keep):
+                day_tree.selection_set(keep)
+                day_tree.see(keep)
+            day_tree.blockSignals(False)
+            tot_ops = sum(s["ops"] for s in items)
+            tot_amt = sum(s["total"] for s in items)
+            sum_lbl.configure(text=T2(f"الأيام: {len(items)}  |  المعاملات: {tot_ops:,}\nالإجمالي: {tot_amt:,.2f} جنيه",
+                                      f"Days: {len(items)}  |  Tx: {tot_ops:,}\nTotal: {tot_amt:,.2f} EGP"))
+
+        def load_days():
+            try:
+                st["stats"] = archive_day_stats(archive_load_rows())
+                have = {x["day"] for x in st["stats"]}
+                for _d, _c in archive_unread_by_day().items():
+                    if _d not in have:
+                        st["stats"].append({"day": _d, "ops": 0, "total": 0.0, "manual": 0, "void": 0,
+                                            "dup": 0, "missing": _c})
+                if cutoff_iso: st["stats"] = [x for x in st["stats"] if x["day"] >= cutoff_iso]
+                st["stats"].sort(key=lambda x: x["day"], reverse=True)
+            except Exception as e:
+                log_exception("archive_history_load", e)
+                st["stats"] = []
+            months = sorted({s["day"][:7] for s in st["stats"]}, reverse=True)
+            cur = cb_month.get()
+            cb_month.configure(values=[ALL] + months)
+            cb_month.set(cur if cur in [ALL] + months else ALL)
+            apply_days()
+
+        day_q.bind("<KeyRelease>", apply_days)
+
+        # ---------- اليمين: بطاقة اليوم المختار ----------
+        hdr = Card()
+        hl_ = QHBoxLayout(hdr); hl_.setContentsMargins(14, 8, 14, 8)
+        day_title = Label(T2("👈 اختار يوم من القائمة لعرض معاملاته", "👈 Pick a day from the list"), size=11, color_key="acc")
+        if core.CURRENT_LANG == "ar":
+            day_title._fixed_icon = "arrowr"; day_title.configure(text=day_title._text)
+        hl_.addWidget(day_title)
+        rl.addWidget(hdr)
+
+        cards_l = QHBoxLayout(); cards_l.setSpacing(6)
+        card_lbls = {}
+        def mk_card(key, title, color):
+            f = Card()
+            fl = QHBoxLayout(f); fl.setContentsMargins(8, 4, 8, 4); fl.setSpacing(6)
+            stripe = QFrame(); stripe.setFixedWidth(3); stripe.setStyleSheet(f"background:{color}; border-radius:1px;")
+            fl.addWidget(stripe)
+            inner = QVBoxLayout(); inner.setSpacing(0)
+            inner.addWidget(Label(title, size=7.6))
+            lb = Label("-", size=12, text_color=None) if False else Label("-", size=12)
+            lb.configure(text_color=color)
+            inner.addWidget(lb)
+            fl.addLayout(inner, 1)
+            cards_l.addWidget(f, 1)
+            card_lbls[key] = lb
+        mk_card("total", T2("إجمالي اليوم (الصافي)", "Day total (net)"), t["success"])
+        mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
+        mk_card("void", T2("ملغي", "Void"), t["danger"])
+        mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
+        rl.addLayout(cards_l)
+
+        def day_folder_of(iso):
+            dd = datetime.date.fromisoformat(iso)
+            f = archive_day_dir(folder, dd)
+            if not os.path.isdir(f): f = archive_day_folder_from_index(iso) or f
+            return dd, f
+
+        def d_excel():
+            if not is_admin: return
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            if not os.path.isdir(f):
+                messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
+                return
+            xp = archive_day_excel_path(f, dd)
+            if os.path.exists(xp):
+                _startfile(xp)
+                return
+            recs = list(st["recs"]) if st["recs_iso"] == iso and st["recs"] else None
+            _set_status(T2("جاري إنشاء إكسيل اليوم...", "Building day Excel..."))
+            def work():
+                res = archive_write_day_excel(f, dd, recs)
+                def fin():
+                    if not win.winfo_exists(): return
+                    if res and os.path.exists(res):
+                        _set_status(T2("تم إنشاء إكسيل اليوم ✓", "Day Excel built ✓"))
+                        _startfile(res)
+                    else:
+                        _set_status("")
+                        messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        def d_summary():
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            pdfs = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
+            if pdfs:
+                _startfile(pdfs[0])
+                return
+            if not os.path.isdir(f):
+                messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
+                return
+            if not REPORTLAB_AVAILABLE:
+                messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد إيصال سمري لهذا اليوم.", "No summary receipt for this day."), parent=win)
+                return
+            _set_status(T2("جاري إنشاء إيصال السمري...", "Building summary receipt..."))
+            def work():
+                try:
+                    recs = archive_day_records(f)
+                    if recs: self._generate_day_summary_pdf(f, dd.strftime("%d-%m-%Y"), recs)
+                except Exception as e: log_exception("archive_d_summary", e)
+                def fin():
+                    if not win.winfo_exists(): return
+                    made = sorted(glob.glob(os.path.join(f, "Samary_*.pdf")))
+                    if made:
+                        _set_status(T2("تم إنشاء إيصال السمري ✓", "Summary receipt built ✓"))
+                        _startfile(made[0])
+                    else:
+                        _set_status("")
+                        messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا توجد معاملات لبناء السمري لهذا اليوم.", "No transactions to build a summary for this day."), parent=win)
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        def d_folder():
+            if not is_admin: return
+            iso = st["iso"]
+            if not iso: return
+            dd, f = day_folder_of(iso)
+            if os.path.isdir(f): _startfile(f)
+            else: messagebox.showerror(T2("غير موجود", "Not found"), f, parent=win)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
+        if is_admin: btn_row.addWidget(Button(T2("📊 إكسيل اليوم", "📊 Day Excel"), command=d_excel))
+        btn_row.addWidget(Button(T2("📄 إيصال السمري", "📄 Summary receipt"), command=d_summary, role="primary"))
+        if is_admin:
+            btn_row.addWidget(Button(T2("📂 فولدر اليوم", "📂 Day folder"), command=d_folder))
+            btn_row.addWidget(Button(T2("♻️ إعادة أرشفة اليوم", "♻️ Re-archive day"),
+                                     command=lambda: run_rearchive([st["iso"]] if st["iso"] else []), role="danger"))
+        btn_row.addStretch(1)
+        rl.addLayout(btn_row)
+
+        search_row = Card()
+        sl = QHBoxLayout(search_row); sl.setContentsMargins(8, 6, 14, 6); sl.setSpacing(6)
+        tx_q = Entry(placeholder=tr("search_placeholder")); tx_q.setFixedWidth(280)
+        ALL_ST = T2("كل الحالات", "All statuses")
+        status_map = {
+            T2("سليم", "OK"): {"ok"}, T2("يدوي", "Manual"): {"manual"},
+            T2("مكرر", "Duplicate"): {"dup"}, T2("ملغي", "Void"): {"void"},
+            T2("ناقص / وحدة أخرى", "Incomplete / other unit"): {"missing", "wrong"},
+        }
+        cb_status = Combo(values=[ALL_ST] + list(status_map.keys()), readonly=True, command=lambda v: refresh_tx())
+        cb_status.setFixedWidth(170)
+        cb_status.set(ALL_ST)
+        tx_count = Label("", size=9, color_key="acc")
+        sl.addWidget(tx_q); sl.addWidget(cb_status); sl.addStretch(1); sl.addWidget(tx_count)
+        rl.addWidget(search_row)
+
+        columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
+        headers = {
+            "idx": tr("col_idx"), "unit": tr("col_unit"), "plate": tr("col_plate"),
+            "insured": tr("col_insured"), "amount": tr("col_amount"), "time": tr("col_time"),
+            "make": tr("col_make"), "model": tr("col_model"), "chassis": tr("col_chassis"),
+            "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
+        }
+        _COL_W = {"idx": 42, "unit": 125, "plate": 120, "insured": 190, "amount": 85, "time": 135, "make": 85,
+                  "model": 85, "chassis": 140, "motor": 105, "period": 185, "file": 190, "status": 125}
+        tx_tree = make_tree(columns, headers, _COL_W)
+        rl.addWidget(card_wrap(tx_tree), 1)
+        sort_dirs = {}
+        def sort_tx(col):
+            recs = st["recs"]
+            reverse = sort_dirs.get(col, False)
+            sort_dirs[col] = not reverse
+            if col == "amount":
+                recs.sort(key=lambda r: float(r["amount"]), reverse=reverse)
+            elif col in ("idx", "time"):
+                recs.sort(key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=reverse)
+            else:
+                k = "status_text" if col == "status" else col
+                recs.sort(key=lambda r: str(r.get(k, "")), reverse=reverse)
+            refresh_tx()
+        for col in columns:
+            tx_tree.heading(col, command=lambda c=col: sort_tx(c))
+
+        def _sel_rec():
+            sel = tx_tree.selection()
+            if not sel: return None
+            try: return st["recs"][int(sel[0])]
+            except Exception: return None
+
+        def open_receipt(event=None):
+            rec = _sel_rec()
+            if not rec: return
+            fpath = rec.get("path", "")
+            if fpath and os.path.exists(fpath): _startfile(fpath)
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=win)
+
+        def reprint_receipt():
+            rec = _sel_rec()
+            if not rec: return
+            try: self.reprint_receipt_record(rec)
+            except Exception as e: messagebox.showerror("Error", str(e), parent=win)
+
+        def open_receipt_folder():
+            rec = _sel_rec()
+            if not is_admin: return
+            p = rec.get("path", "") if rec else ""
+            if p and os.path.exists(p): _startfile(os.path.dirname(p))
+            else: d_folder()
+
+        tx_tree.bind("<Double-1>", open_receipt)
+        def _tx_pop(iid, pos):
+            items = [(tr("menu_open_file"), open_receipt), (tr("menu_reprint"), reprint_receipt)]
+            if is_admin: items.append((T2("📂 فتح الفولدر", "📂 Open folder"), open_receipt_folder))
+            popup_menu(win, items, pos)
+        tx_tree.set_context_menu(_tx_pop)
+
+        leg2 = QLabel(legend_html([(tagc["dup"][0], T2("مكرر", "Duplicate")), (tagc["missing"][0], T2("ناقص", "Incomplete")),
+                                   (tagc["wrong"][0], T2("وحدة أخرى", "Other unit")), (tagc["void"][0], T2("ملغي (مخصوم)", "Void"))])
+                      + "&nbsp;&nbsp;•&nbsp;&nbsp;" + T2("دبل كليك لفتح الإيصال", "double-click to open receipt"))
+        leg2.setTextFormat(Qt.RichText)
+        rl.addWidget(leg2)
+
+        def refresh_tx(*_):
+            recs = st["recs"]
+            q = tx_q.get().strip().lower()
+            kinds = status_map.get(cb_status.get())
+            tx_tree.batch(True)
+            tx_tree.delete(*tx_tree.get_children())
+            shown = 0
+            for i, r in enumerate(recs):
+                if kinds and r.get("kind") not in kinds: continue
+                if q:
+                    full_s = f"{r['unit']} {r['plate']} {r['insured']} {r['time']} {r['chassis']} {r['motor']} {r['make']} {r['model']} {r['file']} {r['status_text']} {r['amount']:.2f}".lower()
+                    if q not in full_s: continue
+                vals = (i + 1, r["unit"], r["plate"], r["insured"], f"{r['amount']:.2f}", r["time"],
+                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
+                tx_tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
+                shown += 1
+            tx_tree.batch(False)
+            tx_count.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
+
+        def show_day_summary_cards():
+            recs = st["recs"]
+            tot, cnt = counted_totals(recs)
+            card_lbls["total"].configure(text=f"{tot:,.2f}")
+            card_lbls["count"].configure(text=f"{cnt:,}")
+            card_lbls["void"].configure(text=str(sum(1 for r in recs if r.get("is_void"))))
+            card_lbls["dup"].configure(text=str(sum(1 for r in recs if r.get("kind") == "dup")))
+
+        def clear_day_view(msg=None):
+            st["recs"], st["recs_iso"] = [], None
+            tx_tree.delete(*tx_tree.get_children())
+            for k in card_lbls: card_lbls[k].configure(text="-")
+            tx_count.configure(text="")
+            if msg is not None: day_title.configure(text=msg)
+
+        def show_day(iso):
+            st["iso"] = iso
+            st["load_id"] += 1
+            my_id = st["load_id"]
+            y, m, d = iso.split("-")
+            title = T2(f"📅 يوم {d}-{m}-{y}", f"📅 Day {d}-{m}-{y}")
+            day_title._fixed_icon = None
+            if iso in st["cache"]:
+                st["recs"], st["recs_iso"] = st["cache"][iso], iso
+                day_title.configure(text=title)
+                show_day_summary_cards()
+                refresh_tx()
+                return
+            clear_day_view(title + T2("   ⏳ جاري تحميل المعاملات...", "   ⏳ Loading transactions..."))
+            try: dd, f = day_folder_of(iso)
+            except Exception: return
+            if not os.path.isdir(f):
+                day_title.configure(text=title + T2("   ⚠️ الفولدر غير موجود", "   ⚠️ Folder not found"))
+                return
+            def work():
+                try: recs = load_archive_day_records(f, dd)
+                except Exception as e:
+                    log_exception("archive_show_day", e)
+                    recs = []
+                def fin():
+                    if not win.winfo_exists() or my_id != st["load_id"]: return
+                    st["cache"][iso] = recs
+                    st["recs"], st["recs_iso"] = recs, iso
+                    day_title.configure(text=title if recs else title + T2("   (لا توجد معاملات)", "   (no transactions)"))
+                    show_day_summary_cards()
+                    refresh_tx()
+                self.after(0, fin)
+            threading.Thread(target=work, daemon=True).start()
+
+        def on_day_select(event=None):
+            sel = day_tree.selection()
+            if not sel or sel[0] == st["iso"] and st["recs_iso"] == st["iso"]: return
+            if st["sel_job"]:
+                try: win.after_cancel(st["sel_job"])
+                except Exception as _e: _log_silent("on_day_select#1", _e)
+            iso = sel[0]
+            st["sel_job"] = win.after(150, lambda: show_day(iso))
+        day_tree.bind("<<TreeviewSelect>>", on_day_select)
+
+        def goto_day(iso):
+            tv.setCurrentIndex(0)
+            clear_filters()
+            if day_tree.exists(iso):
+                day_tree.selection_set(iso)
+                day_tree.see(iso)
+                show_day(iso)
+
+        tx_q.bind("<KeyRelease>", refresh_tx)
+
+        def _dpop(iid, pos):
+            show_day(iid)
+            items = []
+            if is_admin: items.append((T2("📊 إكسيل اليوم", "📊 Day Excel"), d_excel))
+            items.append((T2("📄 إيصال السمري", "📄 Summary receipt"), d_summary))
+            if is_admin:
+                items.append((T2("📂 فولدر اليوم", "📂 Day folder"), d_folder))
+                items.append((T2("♻️ إعادة أرشفة اليوم ده", "♻️ Re-archive this day"),
+                              lambda: run_rearchive([st["iso"]] if st["iso"] else [])))
+            popup_menu(win, items, pos)
+        day_tree.set_context_menu(_dpop)
+
+        # ================= تبويب البحث العام =================
+        tsl = QVBoxLayout(tab_search); tsl.setContentsMargins(0, 6, 0, 0); tsl.setSpacing(4)
+        f2_card = Card()
+        f2l = QVBoxLayout(f2_card); f2l.setContentsMargins(10, 8, 10, 8); f2l.setSpacing(6)
+        s_entry = Entry(placeholder=T2("اسم / لوحة / شاسيه / موتور / مبلغ أو نطاق (500-1000)...",
+                                       "Name / plate / chassis / motor / amount or range (500-1000)..."))
+        ALL_S_ST = T2("كل الحالات", "All statuses")
+        s_status_map = {ALL_S_ST: "all", T2("سليم", "OK"): "ok", T2("يدوي", "Manual"): "manual", T2("ملغي", "Void"): "void"}
+        cb_s_status = Combo(values=list(s_status_map.keys()), readonly=True, command=lambda v: do_search())
+        cb_s_status.setFixedWidth(125)
+        cb_s_status.set(ALL_S_ST)
+        ALL_U = T2("كل الوحدات", "All units")
+
+        def clear_search_filters():
+            s_entry.delete(0, "end")
+            e_s_from.delete(0, "end")
+            e_s_to.delete(0, "end")
+            cb_s_unit.set(ALL_U)
+            cb_s_status.set(ALL_S_ST)
+            inc_void.setChecked(True)
+            do_search()
+        f2l.addLayout(hbox(s_entry, cb_s_status, Button(T2("✖ مسح", "✖ Clear"), command=clear_search_filters),
+                           stretch_at=0))
+        _u_vals = [ALL_U] + archive_units_list(cutoff_iso)
+        cb_s_unit = Combo(values=_u_vals, readonly=True, command=lambda v: do_search())
+        cb_s_unit.setFixedWidth(185)
+        cb_s_unit.set(ALL_U)
+        e_s_from = Entry(placeholder="DD-MM-YYYY"); e_s_from.setFixedWidth(105); e_s_from.setLayoutDirection(Qt.LeftToRight)
+        e_s_to = Entry(placeholder="DD-MM-YYYY"); e_s_to.setFixedWidth(105); e_s_to.setLayoutDirection(Qt.LeftToRight)
+        inc_void = QCheckBox(T2("إظهار الملغي", "Include void"))
+        inc_void.setChecked(True)
+        s_count = Label("", size=9, color_key="acc")
+        f2l.addLayout(hbox(cb_s_unit, 4, Label(T2("من:", "From:"), size=8.5), e_s_from, 4,
+                           Label(T2("إلى:", "To:"), size=8.5), e_s_to, 6, inc_void, None, s_count))
+        tsl.addWidget(f2_card)
+
+        s_cols = ("date", "unit", "plate", "insured", "amount", "chassis", "time", "status", "file")
+        s_hdr = {"date": T2("يوم الأرشيف", "Archive day"), "unit": T2("الوحدة", "Unit"), "plate": T2("اللوحة", "Plate"),
+                 "insured": T2("المؤمن له", "Insured"), "amount": T2("المبلغ", "Amount"),
+                 "chassis": T2("الشاسيه", "Chassis"), "time": T2("الوقت", "Time"),
+                 "status": T2("الحالة", "Status"), "file": T2("الملف", "File")}
+        s_tree = make_tree(s_cols, s_hdr, {"date": 98, "unit": 135, "plate": 100, "insured": 175, "amount": 88,
+                                           "chassis": 130, "time": 118, "status": 76, "file": 165})
+        tsl.addWidget(card_wrap(s_tree), 1)
+        s_paths = {}
+        s_days = {}
+
+        def do_search(*_):
+            q = s_entry.get().strip()
+            d_from = parse_flex_date(e_s_from.get())
+            d_to = parse_flex_date(e_s_to.get())
+            min_d = d_from.isoformat() if d_from else ""
+            if cutoff_iso and (not min_d or min_d < cutoff_iso):
+                min_d = cutoff_iso
+            max_d = d_to.isoformat() if d_to else ""
+            u_sel = cb_s_unit.get()
+            u_filt = "" if (not u_sel or u_sel == ALL_U) else u_sel
+            st_filt = s_status_map.get(cb_s_status.get(), "all")
+
+            s_tree.delete(*s_tree.get_children())
+            s_paths.clear()
+            s_days.clear()
+            has_user_filter = bool(d_from or d_to or u_filt or st_filt != "all")
+            if not q and not has_user_filter:
+                s_count.configure(text="")
+                return
+            try:
+                rows = archive_search(
+                    q, include_void=bool(inc_void.isChecked()), min_day=min_d, max_day=max_d,
+                    unit_filter=u_filt, status_filter=st_filt
+                )
+            except Exception as e:
+                log_exception("archive_search", e)
+                rows = []
+            tot = 0.0
+            s_tree.batch(True)
+            for i, row in enumerate(rows):
+                path, day, fname, unit, plate, insured, amount, rtime, is_manual, is_void = row[:10]
+                ch = row[10] if len(row) > 10 else "-"
+                y, m, d = day.split("-")
+                if is_void: status, tag = T2("ملغي", "Void"), "void"
+                elif is_manual: status, tag = T2("يدوي", "Manual"), "manual"
+                else: status, tag = T2("سليم", "OK"), ("odd" if i % 2 else "")
+                if not is_void: tot += amount
+                iid = str(i)
+                s_paths[iid] = path
+                s_days[iid] = day
+                s_tree.insert("", "end", iid=iid, tags=(tag,) if tag else (),
+                              values=(f"{d}-{m}-{y}", unit, plate, insured, f"{amount:,.2f}", ch, rtime, status, fname))
+            s_tree.batch(False)
+            s_count.configure(text=T2(f"النتائج: {len(rows):,}  |  الإجمالي (بدون الملغي): {tot:,.2f}",
+                                      f"Results: {len(rows):,}  |  Total (excl. void): {tot:,.2f}"))
+
+        def _debounced(*_):
+            if st["debounce"]:
+                try: win.after_cancel(st["debounce"])
+                except Exception as _e: _log_silent("_debounced#1", _e)
+            st["debounce"] = win.after(220, do_search)
+        for e_ in (s_entry, e_s_from, e_s_to):
+            e_.bind("<KeyRelease>", _debounced)
+            e_.bind("<Return>", do_search)
+        inc_void.toggled.connect(lambda _v: do_search())
+
+        def open_result(event=None, folder_only=False):
+            sel = s_tree.selection()
+            if not sel: return
+            p = s_paths.get(sel[0], "")
+            if not p or not os.path.exists(p):
+                messagebox.showerror(T2("غير موجود", "Not found"), os.path.basename(p or ""), parent=win)
+                return
+            if folder_only:
+                if is_admin: _startfile(os.path.dirname(p))
+            else: _startfile(p)
+        s_tree.bind("<Double-1>", open_result)
+
+        def view_result_day():
+            sel = s_tree.selection()
+            if sel and s_days.get(sel[0]): goto_day(s_days[sel[0]])
+
+        def _spop(iid, pos):
+            items = [(T2("📄 فتح الإيصال", "📄 Open receipt"), open_result)]
+            if is_admin: items.append((T2("📂 فتح فولدر اليوم", "📂 Open day folder"), lambda: open_result(folder_only=True)))
+            items.append((T2("📋 عرض كل معاملات اليوم ده", "📋 View all transactions of this day"), view_result_day))
+            popup_menu(win, items, pos)
+        s_tree.set_context_menu(_spop)
+
+        load_days()
+        win.show()
+        win.raise_(); win.activateWindow()
+        QTimer.singleShot(20, day_q.setFocus)
+        run_maintenance(light=True)
+
+    # ---------- عرض السجلات ----------
+    def _records_window(self, records, live=True, day_iso=None, day_folder=None):
+        """نافذة عرض السجلات: live=True لسجلات اليوم الحالي (فيها إلغاء/استرجاع)، live=False لأي يوم من الأرشيف."""
+        if live:
+            old_r = getattr(self, "_records_win", None)
+            try:
+                if old_r is not None and old_r.winfo_exists():
+                    old_r.destroy()
+            except Exception as _e: _log_silent("_records_window#old", _e)
+        t = THEMES[self.current_theme_name]
+        tagc = TAG_COLORS[t["mode"]]
+        day_txt = ""
+        if day_iso:
+            yy, mm, dd_ = day_iso.split("-")
+            day_txt = f"{dd_}-{mm}-{yy}"
+        win = Window(self, title=tr("records_viewer_title") + (f" — {day_txt}" if day_txt else ""), resizable=True)
+        if live:
+            self._records_win = win
+        _restore_geom(win, "records_viewer")
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(5)
+
+        if not live:
+            hdr = Card()
+            hl_ = QHBoxLayout(hdr); hl_.setContentsMargins(14, 8, 14, 8)
+            hl_.addWidget(Label(T2(f"📅 أرشيف يوم {day_txt}", f"📅 Archive day {day_txt}"), size=11, color_key="acc"))
+            lay.addWidget(hdr)
+
+        cards_l = QHBoxLayout(); cards_l.setSpacing(6)
+        card_lbls = {}
+
+        def mk_card(key, title, color):
+            f = Card()
+            fl = QHBoxLayout(f); fl.setContentsMargins(8, 4, 8, 4); fl.setSpacing(6)
+            stripe = QFrame(); stripe.setFixedWidth(3); stripe.setStyleSheet(f"background:{color}; border-radius:1px;")
+            fl.addWidget(stripe)
+            inner = QVBoxLayout(); inner.setSpacing(0)
+            inner.addWidget(Label(title, size=7.6))
+            lb = Label("0", size=12)
+            lb.configure(text_color=color)
+            inner.addWidget(lb)
+            fl.addLayout(inner, 1)
+            cards_l.addWidget(f, 1)
+            card_lbls[key] = lb
+
+        mk_card("total", T2("إجمالي المبلغ (الصافي)", "Net total"), t["success"])
+        mk_card("count", T2("عدد المعاملات", "Transactions"), t["accent"])
+        mk_card("shown", T2("صافي المعروض", "Shown total"), t["text"])
+        mk_card("void", T2("ملغي", "Void"), t["danger"])
+        mk_card("dup", T2("مكرر", "Duplicates"), t["warning"])
+        lay.addLayout(cards_l)
+
+        search_row = Card()
+        sl = QHBoxLayout(search_row); sl.setContentsMargins(8, 7, 14, 7); sl.setSpacing(6)
+        search_entry = Entry(placeholder=tr("search_placeholder")); search_entry.setFixedWidth(300)
+        amt_entry = Entry(placeholder=tr("amt_filter_placeholder")); amt_entry.setFixedWidth(95)
+        ALL_ST = T2("كل الحالات", "All statuses")
+        status_map = {
+            T2("سليم", "OK"): {"ok"}, T2("يدوي", "Manual"): {"manual"},
+            T2("مكرر", "Duplicate"): {"dup"}, T2("ملغي", "Void"): {"void"},
+            T2("ناقص / وحدة أخرى", "Incomplete / other unit"): {"missing", "wrong"},
+        }
+        cb_status = Combo(values=[ALL_ST] + list(status_map.keys()), readonly=True, command=lambda v: refresh())
+        cb_status.setFixedWidth(170)
+        cb_status.set(ALL_ST)
+        count_lbl = Label("", size=9, color_key="acc")
+        sl.addWidget(search_entry); sl.addWidget(amt_entry); sl.addWidget(cb_status); sl.addStretch(1); sl.addWidget(count_lbl)
+        lay.addWidget(search_row)
+
+        def _sel_rec():
+            sel = tree.selection()
+            if not sel: return None
+            try: return records[int(sel[0])]
+            except Exception: return None
+
+        def open_selected():
+            rec = _sel_rec()
+            if not rec: return
+            fpath = rec.get("path", "")
+            if fpath and os.path.exists(fpath): _startfile(fpath)
+            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=win)
+
+        def reprint_selected():
+            rec = _sel_rec()
+            if not rec: return
+            try: self.reprint_receipt_record(rec)
+            except Exception as e: messagebox.showerror("Error", str(e), parent=win)
+
+        def open_folder():
+            rec = _sel_rec()
+            p = rec.get("path", "") if rec else ""
+            target = os.path.dirname(p) if p and os.path.exists(p) else day_folder
+            if target and os.path.isdir(target): _startfile(target)
+
+        def open_day_summary():
+            if not day_folder: return
+            pdfs = sorted(glob.glob(os.path.join(day_folder, "Samary_*.pdf")))
+            if pdfs: _startfile(pdfs[0])
+            else: messagebox.showinfo(T2("تنبيه", "Notice"), T2("لا يوجد ملخص لهذا اليوم.", "No summary for this day."), parent=win)
+
+        def cancel_selected():
+            rec = _sel_rec()
+            if not rec: return
+            if rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("void_already"), parent=win)
+                return
+            idx = records.index(rec)
+            msg = tr("void_confirm_msg", idx=idx + 1, amt=rec['amount'])
+            if messagebox.askyesno(tr("void_confirm_title"), msg, parent=win):
+                self.void_selected_record(rec, refresh)
+
+        def restore_selected_void():
+            rec = _sel_rec()
+            if not rec: return
+            if not rec.get("is_void"):
+                messagebox.showinfo(tr("done"), tr("restore_already"), parent=win)
+                return
+            idx = records.index(rec)
+            msg = tr("restore_confirm_msg", idx=idx + 1, amt=rec['amount'])
+            if messagebox.askyesno(tr("restore_confirm_title"), msg, parent=win):
+                self.unvoid_selected_record(rec, refresh)
+
+        def export_day_excel():
+            try: dd_x = datetime.date.fromisoformat(day_iso)
+            except Exception: return
+            p_ = archive_write_day_excel(day_folder, dd_x, list(records))
+            if p_ and os.path.exists(p_): _startfile(p_)
+            else: messagebox.showerror(T2("خطأ", "Error"), T2("تعذر إنشاء الإكسيل (اتأكد إنه مش مفتوح).", "Could not build the Excel (make sure it is not open)."), parent=win)
+
+        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
+        btn_row.addWidget(Button(tr("open_pdf_btn"), command=open_selected, role="primary", icon="pdf"))
+        btn_row.addWidget(Button(tr("btn_reprint"), command=reprint_selected))
+        btn_row.addWidget(Button(T2("📂 فتح الفولدر", "📂 Open folder"), command=open_folder))
+        if live:
+            btn_row.addWidget(Button(tr("btn_void_sel"), command=cancel_selected, role="danger"))
+            btn_row.addWidget(Button(tr("btn_restore_sel"), command=restore_selected_void))
+        else:
+            btn_row.addWidget(Button(T2("📄 ملخص اليوم", "📄 Day summary"), command=open_day_summary))
+            btn_row.addWidget(Button(T2("📊 إكسيل اليوم", "📊 Day Excel"), command=export_day_excel))
+        btn_row.addStretch(1)
+        lay.addLayout(btn_row)
+
+        leg = QLabel(legend_html([(tagc["dup"][0], T2("مكرر", "Duplicate")), (tagc["missing"][0], T2("ناقص", "Incomplete")),
+                                  (tagc["wrong"][0], T2("وحدة أخرى", "Other unit")), (tagc["void"][0], T2("ملغي (مخصوم)", "Void"))])
+                     + "&nbsp;&nbsp;•&nbsp;&nbsp;" + T2("دبل كليك لفتح الإيصال", "double-click to open receipt"))
+        leg.setTextFormat(Qt.RichText)
+        lay.addWidget(leg)
+
+        columns = ("idx", "unit", "plate", "insured", "amount", "time", "make", "model", "chassis", "motor", "period", "file", "status")
+        headers = {
+            "idx": tr("col_idx"), "unit": tr("col_unit"), "plate": tr("col_plate"),
+            "insured": tr("col_insured"), "amount": tr("col_amount"), "time": tr("col_time"),
+            "make": tr("col_make"), "model": tr("col_model"), "chassis": tr("col_chassis"),
+            "motor": tr("col_motor"), "period": tr("col_period"), "file": tr("col_file"), "status": tr("col_status")
+        }
+        _COL_W = {"idx": 42, "unit": 125, "plate": 120, "insured": 190, "amount": 85, "time": 135, "make": 85,
+                  "model": 85, "chassis": 140, "motor": 105, "period": 185, "file": 190, "status": 125}
+        tree = Tree(columns=columns, headers=headers, widths=_COL_W)
+        for kind, (bg, fg) in tagc.items():
+            tree.tag_configure(kind, background=bg, foreground=fg)
+        if ThemeState.key == "dark":
+            tree.tag_configure("odd", background="#16202B", foreground=ThemeState.p()["text"])
+        tc = Card(); tcl = QVBoxLayout(tc); tcl.setContentsMargins(2, 2, 2, 2); tcl.addWidget(tree)
+        lay.addWidget(tc, 1)
+
+        sort_directions = {}
+        def sort_by(col):
+            reverse = sort_directions.get(col, False)
+            sort_directions[col] = not reverse
+            if col == "amount":
+                records.sort(key=lambda r: float(r["amount"]), reverse=reverse)
+            elif col in ("idx", "time"):
+                records.sort(key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=reverse)
+            else:
+                k = "status_text" if col == "status" else col
+                records.sort(key=lambda r: str(r.get(k, "")), reverse=reverse)
+            refresh()
+        for col in columns:
+            tree.heading(col, command=lambda c=col: sort_by(c))
+        tree.bind("<Double-1>", lambda e: open_selected())
+
+        def show_row_menu(iid, pos):
+            items = [(tr("menu_open_file"), open_selected), (tr("menu_reprint"), reprint_selected),
+                     (T2("📂 فتح الفولدر", "📂 Open folder"), open_folder)]
+            if live:
+                items += [None, (tr("menu_void_tx"), cancel_selected), (tr("menu_restore_tx"), restore_selected_void)]
+            popup_menu(win, items, pos)
+        tree.set_context_menu(show_row_menu)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.bind("<Control-f>", lambda e: search_entry.setFocus())
+
+        def refresh(*_):
+            q = search_entry.get().strip().lower()
+            aq = amt_entry.get().strip().replace(",", "")
+            kinds = status_map.get(cb_status.get())
+            tree.batch(True)
+            tree.delete(*tree.get_children())
+            shown = 0
+            shown_valid_sum = 0.0
+            counted = counted_ids(records)
+
+            for i, r in enumerate(records):
+                if kinds and r.get("kind") not in kinds: continue
+                amt_str = f"{r['amount']:.2f}"
+                if aq and aq not in amt_str: continue
+                if q:
+                    full_s = f"{r['unit']} {r['plate']} {r['insured']} {r['time']} {r['chassis']} {r['motor']} {r['make']} {r['model']} {r['file']} {r['status_text']}".lower()
+                    if q not in full_s: continue
+
+                vals = (i + 1, r["unit"], r["plate"], r["insured"], amt_str, r["time"],
+                        r["make"], r["model"], r["chassis"], r["motor"], r["period"], r["file"], r["status_text"])
+                tag = r["kind"] if r["kind"] in ("dup", "void", "missing", "wrong", "manual") else ("odd" if shown % 2 else "")
+                tree.insert("", "end", iid=str(i), values=vals, tags=(tag,) if tag else ())
+                shown += 1
+                if id(r) in counted:
+                    shown_valid_sum += r["amount"]
+            tree.batch(False)
+            tot, cnt = counted_totals(records)
+            card_lbls["total"].configure(text=f"{tot:,.2f}")
+            card_lbls["count"].configure(text=f"{cnt:,}")
+            card_lbls["shown"].configure(text=f"{shown_valid_sum:,.2f}")
+            card_lbls["void"].configure(text=str(sum(1 for r in records if r.get("is_void"))))
+            card_lbls["dup"].configure(text=str(sum(1 for r in records if r.get("kind") == "dup")))
+            count_lbl.configure(text=T2(f"المعروض: {shown:,} سجل", f"Showing: {shown:,} rows"))
+
+        search_entry.bind("<KeyRelease>", refresh)
+        amt_entry.bind("<KeyRelease>", refresh)
+        refresh()
+        win.show(); win.raise_(); win.activateWindow()
+        QTimer.singleShot(20, search_entry.setFocus)
+
+    # ---------- ملخص الفحص ----------
+    def show_custom_summary(self, unit_display_name, total_sum, total_cnt, pdf_count, manual_count, date_label, duplicates=0, wrong=0, missing=0):
+        old = getattr(self, "_summary_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.destroy()
+        except Exception as _e: _log_silent("show_custom_summary#old", _e)
+
+        t = THEMES[self.current_theme_name]
+        modal = Window(self, title=tr("summary_title"))
+        self._summary_win = modal
+        lay = QVBoxLayout(modal)
+        lay.setContentsMargins(0, 0, 0, 12)
+        lay.setSpacing(0)
+        hdr = QFrame(); hdr.setObjectName("Header"); hdr.setFixedHeight(42)
+        hl_ = QHBoxLayout(hdr); hl_.setContentsMargins(14, 0, 14, 0)
+        hl_.addWidget(Label(f"📊  {tr('summary_title')}", size=10.5, color_key="acc"))
+        lay.addWidget(hdr)
+
+        card_box = Card()
+        cb_l = QVBoxLayout(card_box); cb_l.setContentsMargins(14, 10, 14, 12); cb_l.setSpacing(6)
+        _recs = getattr(self, "last_detailed_records", None) or []
+        _cnt = Counter(clean_arabic(r["unit"]) for r in _recs if r.get("unit") and r["unit"] != UNSPEC)
+        clean_opts = [u for u, _n in _cnt.most_common()]
+        _dn = clean_arabic(unit_display_name) if unit_display_name and unit_display_name != UNSPEC else ""
+        if _dn and _dn not in clean_opts:
+            clean_opts.insert(0, _dn)
+        if not clean_opts:
+            for u in UNIT_NAMES + UNITS_LIST:
+                cu = clean_arabic(u)
+                if cu not in clean_opts: clean_opts.append(cu)
+        _sel_unit = _dn if _dn in clean_opts else clean_opts[0]
+
+        def _unit_changed(val):
+            if self.last_summary_info is not None:
+                self.last_summary_info["unit"] = val
+
+        cb_unit = Combo(values=clean_opts, readonly=True, command=_unit_changed)
+        cb_unit.setFixedWidth(215)
+        cb_unit.set(_sel_unit)
+        _unit_changed(_sel_unit)
+        cb_l.addLayout(hbox(Label(tr("unit_name_lbl"), size=8.5), None, cb_unit))
+        cb_l.addWidget(_sep(False))
+
+        void_cnt = self.last_summary_info.get("void_count", 0)
+        void_amt = self.last_summary_info.get("void_sum", 0.0)
+        details = [
+            (tr("period_lbl"), date_label, t["text"], 10),
+            (tr("total_ops_lbl"), f"{total_cnt:,}", t["text"], 11),
+            (tr("pdf_lbl"), f"{pdf_count:,}", t["accent"], 10),
+            (tr("txt_lbl"), f"{manual_count:,}", t["success"], 10),
+            (tr("void_ops_lbl"), f"{void_cnt:,}  (-{void_amt:,.2f} {tr('currency')})", t["danger"], 10),
+        ]
+        if duplicates: details.append((tr("duplicates_lbl"), f"{duplicates}", t["danger"], 10))
+        if wrong: details.append((tr("wrong_lbl"), f"{wrong}", t["warning"], 10))
+        for lbl_t, val_t, val_c, val_sz in details:
+            v = Label(val_t, size=val_sz); v.configure(text_color=val_c)
+            cb_l.addLayout(hbox(Label(lbl_t, size=8.8), None, v))
+        tot_box = Card(name="Pill")
+        tbl = QHBoxLayout(tot_box); tbl.setContentsMargins(8, 6, 12, 6); tbl.setSpacing(8)
+        stripe = QFrame(); stripe.setFixedWidth(4); stripe.setStyleSheet(f"background:{t['success']}; border-radius:2px;")
+        tbl.addWidget(stripe)
+        tbl.addWidget(Label(tr("total_amt_lbl"), size=9.5))
+        tbl.addStretch(1)
+        tv_ = Label(f"{total_sum:,.2f} {tr('currency')}", size=13); tv_.configure(text_color=t["success"])
+        tbl.addWidget(tv_)
+        cb_l.addSpacing(6)
+        cb_l.addWidget(tot_box)
+        wrap = QVBoxLayout(); wrap.setContentsMargins(14, 12, 14, 8); wrap.addWidget(card_box)
+        lay.addLayout(wrap)
+
+        b_bar = QHBoxLayout(); b_bar.setContentsMargins(14, 0, 14, 0); b_bar.setSpacing(6)
+        if self.is_supervisor:
+            b_bar.addWidget(Button(tr("open_excel"), command=lambda: [modal.destroy(), self.open_excel()]))
+        b_bar.addStretch(1)
+        b_bar.addWidget(Button(tr("export_pdf"), command=lambda: self.export_pdf_summary(parent=modal), role="primary"))
+        b_bar.addWidget(Button(T2("إغلاق", "Close"), command=modal.destroy))
+        lay.addLayout(b_bar)
+        modal.show_centered(self, 420, 340)
+
+    # ---------- إضافة يدوي ----------
+    def open_manual(self):
+        old = getattr(self, "_manual_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_manual#exists", _e)
+
+        t = THEMES[self.current_theme_name]
+        win = Window(self, title=tr("manual_win_title"))
+        self._manual_win = win
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(10)
+        card = Card()
+        cl = QVBoxLayout(card); cl.setContentsMargins(12, 6, 12, 12); cl.setSpacing(3)
+
+        def fld(text, warn=False):
+            l = Label(text, size=8.8)
+            if warn: l.set_color_key("warn")
+            cl.addSpacing(5)
+            cl.addWidget(l)
+        fld(tr("manual_amt_lbl"), True)
+        e_a = Entry(); e_a.setMinimumHeight(32); cl.addWidget(e_a)
+        fld(tr("manual_name_lbl"))
+        e_name = Entry(); e_name.setMinimumHeight(32); cl.addWidget(e_name)
+        fld(tr("manual_plate_lbl"))
+        e_p = Entry(); e_p.setMinimumHeight(32); cl.addWidget(e_p)
+        fld(tr("manual_unit_lbl"))
+        cb_u = Combo(values=[""] + UNITS_LIST); cb_u.setMinimumHeight(32); cb_u.set(""); cl.addWidget(cb_u)
+        lay.addWidget(card)
+
+        busy = [False]
+
+        def save(event=None):
+            if busy[0]:
+                return
+            busy[0] = True
+            try: btn_gen.configure(state="disabled")
+            except Exception as _e: _log_silent("manual_save_btn", _e)
+            done = False
+            try:
+                amt = parse_manual_amount(e_a.get())
+                if amt is None:
+                    if e_a.get().strip():
+                        messagebox.showwarning("Error", "Invalid amount", parent=win)
+                    return
+                dest = self.get_clean_path()
+                file_base, now_dt = unique_manual_filename(dest, amt, datetime.datetime.now())
+                t_stamp = now_dt.strftime("%H%M%S")
+                date_tag = now_dt.strftime("%d-%m-%Y")
+                full_path = os.path.join(dest, file_base)
+
+                u_val = cb_u.get().strip() or "-"
+                p_val = e_p.get().strip() or "-"
+                n_val = e_name.get().strip() or "-"
+
+                if not REPORTLAB_AVAILABLE:
+                    messagebox.showerror("Error", "ReportLab is not installed!", parent=win)
+                    return
+
+                self.printed_receipts_set.add(file_base)
+                create_manual_receipt_pdf(full_path, u_val, p_val, n_val, amt, op_dt=now_dt)
+                db_ok = True
+                try:
+                    conn = db_connect()
+                    try:
+                        conn.execute("INSERT INTO manual_tx (unit, plate, insured, amount, created_at, file_name) VALUES (?, ?, ?, ?, ?, ?)",
+                                     (u_val, p_val, n_val, amt, f"{date_tag} {t_stamp}", file_base))
+                        conn.commit()
+                    finally:
+                        conn.close()
+                except Exception as ex_db:
+                    db_ok = False
+                    log_exception("insert_vault", ex_db)
+                if not db_ok:
+                    messagebox.showwarning("Warning", "The receipt was created, but its details (unit / plate / name) "
+                                                      "could not be saved. See app_log.txt.", parent=win)
+
+                if self.auto_print_enabled:
+                    try: self._print_queue.put(full_path)
+                    except Exception as _e: _log_silent("manual_print_queue", _e)
+
+                try: _startfile(full_path)
+                except Exception as _e: _log_silent("save#1", _e)
+                done = True
+                win.destroy()
+            except Exception as ex_save:
+                messagebox.showerror("Error", f"Failed to generate manual receipt:\n{str(ex_save)}", parent=win)
+            finally:
+                if not done:
+                    busy[0] = False
+                    try: btn_gen.configure(state="normal")
+                    except Exception as _e: _log_silent("manual_save_btn2", _e)
+
+        for _ent in (e_a, e_name, e_p):
+            _ent.bind("<Return>", save)
+        btn_gen = Button(tr("manual_generate_btn"), command=save, role="primary", big=True, icon="pdf")
+        btn_cancel = Button(T2("إلغاء", "Cancel"), command=win.destroy, big=True)
+        btn_cancel.setFixedWidth(82)
+        lay.addLayout(hbox(btn_gen, btn_cancel, stretch_at=0, spacing=8))
+        win.show_centered(self, 380, 330, focus=e_a)
+
+    # ---------- إيصال التصوير ----------
+    def print_slip(self):
+        old = getattr(self, "_slip_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("print_slip#exists", _e)
+
+        t = THEMES[self.current_theme_name]
+        win = Window(self, title=tr("slip_dialog_title"))
+        self._slip_win = win
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(14, 12, 14, 12)
+        lay.setSpacing(10)
+        card = Card()
+        cl = QVBoxLayout(card); cl.setContentsMargins(12, 10, 12, 12); cl.setSpacing(3)
+        cl.addWidget(Label(tr("slip_name_lbl"), size=8.8))
+        cb_employee = Combo(values=[""] + EMPLOYEES_LIST); cb_employee.setMinimumHeight(32); cb_employee.set("")
+        cl.addWidget(cb_employee)
+        cl.addSpacing(6)
+        cl.addWidget(Label(tr("slip_unit_lbl"), size=8.8))
+        cb_u = Combo(values=[""] + UNITS_LIST); cb_u.setMinimumHeight(32); cb_u.set("")
+        cl.addWidget(cb_u)
+        tid_pill = Card(name="Pill")
+        tpl = QHBoxLayout(tid_pill); tpl.setContentsMargins(8, 6, 8, 6)
+        lbl_tid = Label(T2("رقم الماكينة: —", "Terminal ID: —"), size=9, color_key="acc", align=Qt.AlignCenter)
+        tpl.addWidget(lbl_tid, 1)
+        cl.addSpacing(8)
+        cl.addWidget(tid_pill)
+        lay.addWidget(card)
+
+        def _update_tid(*_):
+            tid = UNIT_TERMINALS.get(cb_u.get().strip(), "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else T2("رقم الماكينة: —", "Terminal ID: —"))
+        cb_u.configure(command=lambda raw: _update_tid())
+        cb_u.bind("<KeyRelease>", _update_tid)
+
+        def do_p(event=None):
+            emp_val = cb_employee.get().strip()
+            unit_val = cb_u.get().strip()
+            tid_val = UNIT_TERMINALS.get(unit_val, "")
+            date_val = datetime.date.today().strftime('%d/%m/%Y')
+            win.destroy()
+
+            def _print_bg():
+                try:
+                    pdf_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.pdf")
+                    if create_photocopy_slip_pdf(pdf_path, emp_val, unit_val, date_val, tid_val):
+                        sumatra_path = os.path.join(BASE_DIR, "SumatraPDF.exe")
+                        if not os.path.exists(sumatra_path):
+                            sumatra_path = os.path.join(BUNDLE_DIR, "SumatraPDF.exe")
+                        if os.path.exists(sumatra_path):
+                            cmd = [
+                                sumatra_path,
+                                "-print-to-default",
+                                "-print-settings", "shrink",
+                                "-silent",
+                                pdf_path
+                            ]
+                            subprocess.run(cmd, creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0, timeout=90)
+                        else:
+                            if sys.platform == "win32": os.startfile(pdf_path, "print")
+                    else:
+                        txt_path = os.path.join(DOCUMENTS_DIR, "Copy_Slip.txt")
+                        lines = [l for l in [emp_val, unit_val, (f"TID: {tid_val}" if tid_val else ""), date_val] if l]
+                        with open(txt_path, "w", encoding="utf-8") as f: f.write("\n".join(lines) + "\n")
+                        if sys.platform == "win32": os.startfile(txt_path, "print")
+                except Exception as e:
+                    log_exception("print_slip_bg", e)
+
+            threading.Thread(target=_print_bg, daemon=True).start()
+
+        cb_employee.bind("<Return>", do_p)
+        b_print = Button(tr("slip_btn_print"), command=do_p, role="primary", big=True, icon="printer")
+        b_cancel = Button(T2("إلغاء", "Cancel"), command=win.destroy, big=True); b_cancel.setFixedWidth(80)
+        lay.addLayout(hbox(b_print, b_cancel, stretch_at=0, spacing=8))
+        win.show_centered(self, 360, 270, focus=cb_employee)
+
+    def ask_summary_unit(self, parent=None):
+        """نافذة صغيرة: اختيار الوحدة (إجباري) قبل عمل إيصال السمري. بترجّع (اسم الوحدة، رقم الترمنل) أو None لو اتقفلت."""
+        from PySide6.QtCore import QEventLoop
+        parent = parent or self
+        win = Window(parent if isinstance(parent, QWidget) else self, title=T2("🏢 اختيار الوحدة", "🏢 Choose unit"), modal=True)
+        res = {"v": None}
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(16, 14, 16, 10)
+        lay.setSpacing(5)
+        lay.addWidget(Label(T2("اختار الوحدة (إجباري):", "Choose the unit (required):"), size=8.8))
+        cb = Combo(values=UNITS_LIST, readonly=True); cb.setMinimumHeight(32); cb.set("")
+        lay.addWidget(cb)
+        lbl_tid = Label("", size=9, color_key="acc")
+        lay.addWidget(lbl_tid)
+        msg = Label("", size=8.5, color_key="bad")
+        lay.addWidget(msg)
+
+        def _update(*_):
+            tid = UNIT_TERMINALS.get(cb.get().strip(), "")
+            lbl_tid.configure(text=f"Terminal ID: {tid}" if tid else "")
+            if tid: msg.configure(text="")
+        cb.configure(command=lambda raw: _update())
+
+        def ok(event=None):
+            u = cb.get().strip()
+            if u not in UNIT_TERMINALS:
+                msg.configure(text=T2("لازم تختار الوحدة الأول.", "You must choose a unit first."))
+                return
+            res["v"] = (u, UNIT_TERMINALS.get(u, ""))
+            win.destroy()
+
+        lay.addSpacing(6)
+        lay.addWidget(Button(T2("✅ تأكيد وعمل الإيصال", "✅ Confirm & create receipt"), command=ok, role="primary", big=True))
+        lay.addWidget(Button(T2("إلغاء", "Cancel"), command=win.destroy))
+        win.bind("<Return>", ok)
+        loop = QEventLoop()
+        win.destroyed.connect(loop.quit)
+        win.show_centered(parent if isinstance(parent, QWidget) else self, 340, 230)
+        loop.exec()
+        return res["v"]
+
+    # ---------- حاسبة الكاش ----------
+    def open_cash_counter(self):
+        old = getattr(self, "_cash_win", None)
+        try:
+            if old is not None and old.winfo_exists():
+                old.lift(); old.focus_force(); return
+        except Exception as _e: _log_silent("open_cash_counter#exists", _e)
+
+        t = THEMES[self.current_theme_name]
+        win = Window(self, title=tr("cash_win_title"))
+        self._cash_win = win
+        lay = QVBoxLayout(win)
+        lay.setContentsMargins(16, 10, 16, 12)
+        lay.setSpacing(8)
+        hdr_l = QHBoxLayout()
+        hdr_l.addWidget(Label(tr("cash_hdr"), size=12, color_key="acc"))
+        hdr_l.addStretch(1)
+        if self.system_total_sum > 0:
+            badge = Card(name="Pill")
+            bl_ = QHBoxLayout(badge); bl_.setContentsMargins(8, 3, 8, 3)
+            sb = Label(T2(f"السيستم: {self.system_total_sum:,.2f}", f"Sys: {self.system_total_sum:,.2f}"), size=8.5)
+            sb.configure(text_color=t["success"])
+            bl_.addWidget(sb)
+            hdr_l.addWidget(badge)
+        lay.addLayout(hdr_l)
+
+        f_quick = Card()
+        ql = QVBoxLayout(f_quick); ql.setContentsMargins(12, 8, 12, 8); ql.setSpacing(6)
+        e_manual_cash = Entry(justify="center"); e_manual_cash.setFixedWidth(140); e_manual_cash.setMinimumHeight(30)
+        e_pos_in = Entry(justify="center"); e_pos_in.setFixedWidth(140); e_pos_in.setMinimumHeight(30)
+        l1 = Label(tr("cash_manual_lbl"), size=9); l1.set_color_key("warn")
+        l2 = Label(tr("cash_pos_lbl"), size=9); l2.set_color_key("acc")
+        ql.addLayout(hbox(l1, None, e_manual_cash))
+        ql.addLayout(hbox(l2, None, e_pos_in))
+        lay.addWidget(f_quick)
+
+        frame_box = Card()
+        fbl = QVBoxLayout(frame_box); fbl.setContentsMargins(12, 8, 12, 8); fbl.setSpacing(3)
+        lay.addWidget(frame_box)
+
+        denoms = [200, 100, 50, 20, 10, 5, 1]
+        entries = {}
+        sub_lbls = {}
+
+        sum_card = Card()
+        scl = QVBoxLayout(sum_card); scl.setContentsMargins(12, 8, 12, 8); scl.setSpacing(2)
+        lbl_tot_cash = Label(tr("cash_tot_lbl", sum=0), size=9, align=Qt.AlignCenter); lbl_tot_cash.configure(text_color=t["success"])
+        lbl_combined_total = Label(tr("cash_comb_lbl", sum=0), size=10.5, align=Qt.AlignCenter)
+        lbl_diff_sys = Label("", size=9, align=Qt.AlignCenter)
+        for w in (lbl_tot_cash, lbl_combined_total, lbl_diff_sys):
+            scl.addWidget(w, 0, Qt.AlignHCenter)
+        current_calculated = [0.0, 0.0]
+
+        def recalc(*_):
+            c_sum = 0.0
+            for d, ent in entries.items():
+                v = ent.get().strip()
+                sub = int(v) * d if v.isdigit() else 0
+                c_sum += sub
+                sub_lbls[d].configure(text=f"= {sub:,}" if sub else "= 0",
+                                      text_color=t["success"] if sub else t["text_muted"])
+
+            manual_str = e_manual_cash.get().strip().replace(",", "")
+            if manual_str:
+                try: c_sum = float(manual_str)
+                except Exception as _e: _log_silent("recalc#1", _e)
+
+            current_calculated[0] = c_sum
+            lbl_tot_cash.configure(text=tr("cash_tot_lbl", sum=c_sum))
+
+            pos_val = 0.0
+            pos_str = e_pos_in.get().strip().replace(",", "")
+            if pos_str:
+                try: pos_val = float(pos_str)
+                except Exception as _e: _log_silent("recalc#2", _e)
+
+            comb = c_sum + pos_val
+            current_calculated[1] = comb
+            lbl_combined_total.configure(text=tr("cash_comb_lbl", sum=comb))
+
+            if self.system_total_sum > 0:
+                diff = round(comb - self.system_total_sum, 2)
+                if abs(diff) < 0.01: lbl_diff_sys.configure(text=tr("cash_matched_lbl"), text_color=t["success"])
+                elif diff < 0: lbl_diff_sys.configure(text=tr("cash_short_lbl", val=abs(diff)), text_color=t["danger"])
+                else: lbl_diff_sys.configure(text=tr("cash_extra_lbl", val=diff), text_color=t["warning"])
+            else:
+                lbl_diff_sys.configure(text="")
+
+        e_manual_cash.bind("<KeyRelease>", recalc)
+        e_pos_in.bind("<KeyRelease>", recalc)
+
+        for d in denoms:
+            lab = Label(tr("cash_denom_lbl", d=d), size=9); lab.setFixedWidth(95)
+            e = Entry(justify="center"); e.setFixedWidth(90)
+            lbl_s = Label("= 0", size=8.5); lbl_s.setFixedWidth(95)
+            lbl_s.setAlignment(Qt.AlignVCenter | (Qt.AlignLeft if core.CURRENT_LANG == "ar" else Qt.AlignRight))
+            sub_lbls[d] = lbl_s
+            e.bind("<KeyRelease>", recalc)
+            entries[d] = e
+            fbl.addLayout(hbox(lab, None, e, lbl_s))
+        lay.addWidget(sum_card)
+
+        def clear_cash():
+            e_manual_cash.delete(0, "end")
+            e_pos_in.delete(0, "end")
+            for ent in entries.values():
+                ent.delete(0, "end")
+            recalc()
+            e_manual_cash.setFocus()
+
+        def apply_and_close(event=None):
+            if current_calculated[1] > 0:
+                self.e_pos.delete(0, 'end')
+                self.e_pos.insert(0, f"{current_calculated[1]:.2f}")
+                self.check_pos()
+            win.destroy()
+
+        btn_apply = Button(tr("cash_apply_btn"), command=apply_and_close, role="primary", big=True)
+        b_reset = Button(T2("تصفير", "Reset"), command=clear_cash, big=True); b_reset.setFixedWidth(80)
+        lay.addLayout(hbox(btn_apply, b_reset, stretch_at=0, spacing=8))
+        win.bind("<Return>", apply_and_close)
+        recalc()
+        win.show_centered(self, 410, 470, focus=e_manual_cash)
+
+
+def _restore_geom(win, key):
+    """نفس remember_window_geometry: مقاس ومكان النافذة بيتحفظ في config.json (win_geom)."""
+    try:
+        g = (_read_app_config().get("win_geom") or {}).get(key)
+        scr = QGuiApplication.primaryScreen().availableGeometry()
+        w, h = LOG_WIN_W, LOG_WIN_H
+        x = scr.left() + (scr.width() - w) // 2
+        y = scr.top() + (scr.height() - h) // 2
+        if isinstance(g, str):
+            import re as _re
+            m = _re.match(r"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)", g)
+            if m:
+                w, h, x, y = map(int, m.groups())
+        w = max(min(w, scr.width()), min(LOG_WIN_MIN_W, scr.width() - 48))
+        h = max(min(h, scr.height()), min(LOG_WIN_MIN_H, scr.height() - 100))
+        x = max(scr.left(), min(x, scr.right() - 120))
+        y = max(scr.top(), min(y, scr.bottom() - 80))
+        win.setMinimumSize(min(LOG_WIN_MIN_W, scr.width() - 48), min(LOG_WIN_MIN_H, scr.height() - 100))
+        win.resize(w, h)
+        win.move(x, y)
+    except Exception as e:
+        _log_silent("restore_geom", e)
+
+    def _save():
+        try:
+            if win.isMaximized() or win.isFullScreen():
+                return
+            gg = win.geometry()
+            cfg = _read_app_config()
+            geo = cfg.get("win_geom") or {}
+            geo[key] = f"{gg.width()}x{gg.height()}+{gg.x()}+{gg.y()}"
+            _save_app_prefs(win_geom=geo)
+        except Exception as e:
+            _log_silent("save_geom", e)
+    win._save_geom = _save
+    orig = win.closeEvent
+
+    def _close(e, orig=orig):
+        _save()
+        orig(e)
+    win.closeEvent = _close
+
+
+def main():
+    if sys.platform == "win32":
+        try:
+            QApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
+        except Exception:
+            pass
+    app = QApplication.instance() or QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setQuitOnLastWindowClosed(False)
+    f = QFont()
+    f.setFamilies(ui.FONT_FAMILIES)
+    f.setPointSizeF(9)
+    app.setFont(f)
+    ui.register_core_themes()
+    ui.install_dialog_shims()
+    core.ElevateLoginGate = LoginGate
+    w = MainWindow()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
