@@ -1,35 +1,75 @@
-name: Build Windows EXE (OneFile)
+name: Build A2R POS Console
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: windows-latest
-
+    timeout-minutes: 60
     steps:
-    - name: Checkout Code
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pyinstaller
+      - name: Install libraries
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyside6-essentials==6.12.0 pillow==13.0.0 reportlab==5.1.0 arabic-reshaper==3.1.0 python-bidi==0.6.12 openpyxl==3.1.5 pypdf==7.0.0 pyinstaller==6.22.3
 
-    - name: Build with PyInstaller (OneFile)
-      run: |
-        pyinstaller --noconfirm --onefile --windowed --name "A2R_Console" --icon "app.ico" --add-data "pdftotext.exe;." --add-data "SumatraPDF.exe;." "main.py"
+      - name: Check files
+        shell: pwsh
+        run: |
+          python -m py_compile collect.py
+          foreach ($f in 'collect.py','app.ico','pdftotext.exe') {
+            if (-not (Test-Path $f)) { Write-Error "Missing required file: $f"; exit 1 }
+          }
+          if (-not (Test-Path 'SumatraPDF.exe')) { Write-Warning "SumatraPDF.exe not found: printing falls back to default Windows printing." }
 
-    - name: Upload EXE
-      uses: actions/upload-artifact@v4
-      with:
-        name: A2R-Console-App-Standalone
-        path: dist/A2R_Console.exe
+      - name: Build exe
+        shell: pwsh
+        run: |
+          $pyArgs = @(
+            '--clean','--noconsole','--onefile',
+            '--name','A2R POS Console',
+            '--icon=app.ico',
+            '--add-data','app.ico;.',
+            '--add-binary','pdftotext.exe;.',
+            '--collect-all','reportlab',
+            '--collect-all','arabic_reshaper',
+            '--collect-all','bidi',
+            '--hidden-import','pypdf',
+            '--hidden-import','openpyxl',
+            '--hidden-import','hmac',
+            '--hidden-import','PySide6.QtSvg',
+            '--exclude-module','tkinter',
+            '--exclude-module','customtkinter'
+          )
+          if (Test-Path 'SumatraPDF.exe') { $pyArgs += @('--add-binary','SumatraPDF.exe;.') }
+          $pyArgs += 'collect.py'
+          python -m PyInstaller @pyArgs
+          if (-not (Test-Path "dist/A2R POS Console.exe")) { Write-Error "Build failed"; exit 1 }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: A2R POS Console
+          path: dist/A2R POS Console.exe
+
+      - name: Publish release (keep latest two)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = "build-${{ github.run_number }}"
+          Copy-Item "dist/A2R POS Console.exe" "dist/A2R_POS_Console.exe"
+          gh release create $tag "dist/A2R_POS_Console.exe" --title "A2R POS Console (build ${{ github.run_number }})" --notes "Built from ${{ github.sha }}"
+          $old = gh release list --limit 100 --json tagName --jq '.[].tagName' | Where-Object { $_ -like "build-*" } | Select-Object -Skip 2
+          foreach ($t in $old) { gh release delete $t --yes --cleanup-tag }
