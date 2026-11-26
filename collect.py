@@ -33,7 +33,9 @@ if sys.platform == "win32":
         _user32.SetForegroundWindow.restype = wintypes.BOOL
         _SINGLE_INSTANCE_MUTEX = _kernel32.CreateMutexW(None, wintypes.BOOL(False), MUTEX_NAME)
         if _kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-            hwnd = (_user32.FindWindowW(None, "A2R POS Console - Ahmed Ramadan")
+            hwnd = (_user32.FindWindowW(None, "A2R SYSTEM - Ahmed Ramadan")
+                    or _user32.FindWindowW(None, "A2R Console - Ahmed Ramadan")
+                    or _user32.FindWindowW(None, "A2R POS Console - Ahmed Ramadan")
                     or _user32.FindWindowW(None, "A2R Operations Console - Ahmed Ramadan"))
             if hwnd:
                 _user32.ShowWindow(hwnd, 9)  # SW_RESTORE
@@ -4936,7 +4938,7 @@ class ConsoleLogic:
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _tray_notify(self, msg, title="A2R Console", _attempt=0):
+    def _tray_notify(self, msg, title="A2R SYSTEM", _attempt=0):
         """إشعار ويندوز من أيقونة البرنامج بجوار الساعة."""
         try:
             icon = getattr(self, "tray_icon", None)
@@ -5336,7 +5338,7 @@ class ConsoleLogic:
                 else:
                     # مفيش إعادة طباعة تلقائية (ممكن تطلّع إيصال مكرر للعميل): بنبلّغ المستخدم وهو يعيد الطباعة
                     self.run_on_main(lambda fn=fname: self._tray_notify(
-                        T2(f"تعذرت طباعة الإيصال: {fn}", f"Printing failed: {fn}"), "A2R Console"))
+                        T2(f"تعذرت طباعة الإيصال: {fn}", f"Printing failed: {fn}"), "A2R SYSTEM"))
 
         self._print_queue = queue.Queue()
         threading.Thread(target=_print_worker, daemon=True).start()
@@ -5728,12 +5730,22 @@ from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox,
                                QProgressBar, QFrame, QHBoxLayout, QVBoxLayout, QMessageBox, QFileDialog,
                                QInputDialog, QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView,
-                               QMenu, QSizePolicy, QStyle, QStyleOptionButton, QStylePainter)
+                               QMenu, QSizePolicy, QStyle, QStyleOptionButton, QStylePainter, QDialog)
 
 
 FONT_FAMILIES = ["Segoe UI", "Noto Sans Arabic", "Noto Sans", "Tahoma", "Arial"]
+# النصوص العادية/الصغيرة: أتقل سنة بسيطة من Normal (في ويندوز = Segoe UI Semibold). العريض فاضل زي ما هو.
+UI_TEXT_WEIGHT = QFont.DemiBold
 
-# ───────────────────────── الثيمات: 3 ألوان × (فاتح / غامق) — شكل زجاجي هادي ─────────────────────────
+
+def app_base_font(pt=9):
+    f = QFont()
+    f.setFamilies(FONT_FAMILIES)
+    f.setPointSizeF(pt)
+    f.setWeight(UI_TEXT_WEIGHT)
+    return f
+
+# ───────────────────────── الثيمات: 10 ألوان × (فاتح / غامق) — شكل زجاجي هادي ─────────────────────────
 # الترتيب: رملي دهبي (الافتراضي) / مريمية / لافندر. كل ثيم فيه:
 #   grad + blobs: الخلفية (بتترسم مرة واحدة كصورة) — card/glass2/edge: الكروت الشفافة
 #   solid/bg/sub: ألوان مصمتة للنوافذ الفرعية والقوايم المنسدلة
@@ -5787,9 +5799,70 @@ PAL = {
                       "#EEF0F7", "#FBFBFE", "#F5F5FB", "#262B3F", "#6A7088", "#6476C4", "#5466B3", "#FFFFFF",
                       "rgba(80,90,130,0.16)", "#C85B6B", "#F2F3FA", "#2F8576"),
 }
-DEFAULT_THEME = "sand-dark"
-PALETTES = ("sand", "sage", "lav")
-PALETTE_LABELS = {"sand": ("رملي دهبي", "Sand gold"), "sage": ("مريمية", "Sage"), "lav": ("لافندر", "Lavender")}
+# ───── ألوان الجولة الرابعة (كل لون فاتح + غامق) ─────
+_L8 = "rgba(255,255,255,0.08)"
+PAL.update({
+    "ruby-dark": _pal("dark", ("#171012", "#1A1214", "#141317"), ("#52222B", "#3A2428", "#2A2533"), 0.70,
+                      "#181012", "#241A1C", "#1E1517", "#F0E6E7", "#A8949A", "#D9737E", "#C9606C", "#1A0E10",
+                      _L8, "#F2A07C", "#271C1E", "#D4B56C"),
+    "ruby-light": _pal("light", ("#F8F1F1", "#F5EFEF", "#F0EEF1"), ("#EBC5CA", "#E2D3D5", "#D8D3E0"), 0.60,
+                       "#F5EEEE", "#FCF8F8", "#F8F2F2", "#2F2224", "#7D6A6D", "#A8424F", "#943743", "#FFFFFF",
+                       "rgba(120,50,60,0.16)", "#C46A2F", "#F8F1F1", "#3C8A7A"),
+    "blue-dark": _pal("dark", ("#0F1319", "#11161D", "#13151A"), ("#1F3658", "#243049", "#2A2A3D"), 0.70,
+                      "#10141A", "#1A2029", "#151A22", "#E6ECF3", "#8E9AAB", "#6FA3E8", "#5A90D8", "#0C1420",
+                      _L8, "#E8938C", "#1C232D", "#D4B56C"),
+    "blue-light": _pal("light", ("#EFF3F8", "#F1F4F8", "#F2F2F5"), ("#C6D6EE", "#D3DCE8", "#DDD9E6"), 0.60,
+                       "#EDF1F6", "#FAFBFD", "#F4F6FA", "#1F2733", "#66707E", "#2F6DB8", "#285FA3", "#FFFFFF",
+                       "rgba(40,70,120,0.16)", "#C0605A", "#F1F4F8", "#A7843A"),
+    "emerald-dark": _pal("dark", ("#0E1512", "#101814", "#131716"), ("#1E4A38", "#233A33", "#2A3330"), 0.70,
+                         "#0F1512", "#18211D", "#141C18", "#E3EEE8", "#8FA59A", "#5FC49A", "#4DB088", "#0B1811",
+                         _L8, "#E8938C", "#1B2520", "#D4B56C"),
+    "emerald-light": _pal("light", ("#EEF5F1", "#F1F5F3", "#F3F4F1"), ("#BFE0CF", "#CFDDD6", "#DEE0D2"), 0.60,
+                          "#EDF3EF", "#FAFCFB", "#F3F7F4", "#1F2C26", "#62736A", "#23805C", "#1D6E4F", "#FFFFFF",
+                          "rgba(40,100,70,0.16)", "#C0605A", "#F0F5F2", "#A7843A"),
+    "graphite-dark": _pal("dark", ("#131416", "#151618", "#121315"), ("#34383E", "#2B2E33", "#25282C"), 0.70,
+                          "#131416", "#1E2023", "#18191C", "#ECEEF1", "#9A9FA6", "#C9D1DA", "#B6BFC9", "#15171A",
+                          _L8, "#E8938C", "#1F2124", "#D4B56C"),
+    "graphite-light": _pal("light", ("#F2F3F5", "#F0F1F3", "#EEEFF1"), ("#D3D7DD", "#DCDFE3", "#CDD1D7"), 0.55,
+                           "#EFF0F2", "#FCFCFD", "#F5F6F7", "#202326", "#686D74", "#4F5964", "#434C56", "#FFFFFF",
+                           "rgba(40,45,55,0.16)", "#C0605A", "#F3F4F6", "#A7843A"),
+    "navy-dark": _pal("dark", ("#0D1220", "#0F1524", "#111421"), ("#1E2E55", "#2A2E48", "#3A3424"), 0.75,
+                      "#0E1321", "#18203A", "#131A2C", "#EAEDF5", "#97A0B8", "#D4B56C", "#C6A65B", "#141007",
+                      _L8, "#E8938C", "#18203A", "#7FBFB0"),
+    "navy-light": _pal("light", ("#EEF1F7", "#F1F2F6", "#F5F3EC"), ("#C5CFE6", "#D3D7E6", "#E9DFC4"), 0.60,
+                       "#EDF0F6", "#FBFBFD", "#F4F5F9", "#1C2236", "#666D84", "#A7843A", "#957432", "#FFFFFF",
+                       "rgba(30,45,90,0.16)", "#C0605A", "#F1F3F8", "#2E4A8A"),
+    "burgundy-dark": _pal("dark", ("#170E12", "#1A1015", "#141015"), ("#4E1E30", "#3A2230", "#3A3022"), 0.75,
+                          "#170E12", "#25181E", "#1E1418", "#F1E7EA", "#AA949C", "#D4B56C", "#C6A65B", "#1A1209",
+                          _L8, "#F2A07C", "#261A1F", "#E0A3B4"),
+    "burgundy-light": _pal("light", ("#F8F1F2", "#F5EFF0", "#F6F3EC"), ("#E6C3CC", "#E2D2D6", "#EADFC6"), 0.60,
+                           "#F5EEEF", "#FCF8F9", "#F8F2F3", "#2E2125", "#7B6A6F", "#A7843A", "#957432", "#FFFFFF",
+                           "rgba(110,40,60,0.16)", "#C0605A", "#F8F1F2", "#8A3A52"),
+})
+
+
+def _flat(src, edge):
+    """«مُصمت» = نفس الرملي الدهبي من غير زجاج: خلفية سادة وكروت مصمتة."""
+    p = dict(PAL[src])
+    p.update(blobs=p["grad"], bo=0.0, card=p["solid"], hero=p["solid"], glass2=p["sub"], input=p["sub"],
+             rail=p["sub"], edge=edge, border=edge)
+    return p
+
+
+PAL["flat-dark"] = _flat("sand-dark", "rgba(255,255,255,0.07)")
+PAL["flat-light"] = _flat("sand-light", "rgba(110,90,50,0.14)")
+
+DEFAULT_THEME = "graphite-dark"
+PALETTES = ("graphite", "sand", "sage", "lav", "ruby", "blue", "emerald", "navy", "burgundy", "flat")
+PALETTE_LABELS = {"sand": ("رملي دهبي", "Sand gold"), "sage": ("مريمية", "Sage"), "lav": ("لافندر", "Lavender"),
+                  "ruby": ("ياقوتي (أحمر هادي)", "Ruby"), "blue": ("أزرق", "Blue"), "emerald": ("زمردي", "Emerald"),
+                  "graphite": ("جرافيت فضي", "Graphite silver"), "navy": ("كحلي دهبي", "Navy gold"),
+                  "burgundy": ("نبيتي دهبي", "Burgundy gold"), "flat": ("رملي دهبي مُصمت", "Sand gold flat")}
+# أسماء قصيرة لقايمة الألوان في وضع الميني (الهيدر هناك ضيق)
+PALETTE_SHORT = {"sand": ("رملي", "Sand"), "sage": ("مريمية", "Sage"), "lav": ("لافندر", "Lavender"),
+                 "ruby": ("ياقوتي", "Ruby"), "blue": ("أزرق", "Blue"), "emerald": ("زمردي", "Emerald"),
+                 "graphite": ("جرافيت", "Graphite"), "navy": ("كحلي", "Navy"), "burgundy": ("نبيتي", "Burgundy"),
+                 "flat": ("مُصمت", "Flat")}
 MODE_LABELS = {"light": ("☀ فاتح", "☀ Light"), "dark": ("🌙 غامق", "🌙 Dark")}
 THEME_LABELS = {k: (PALETTE_LABELS[k.split("-")[0]][0] + " " + MODE_LABELS[k.split("-")[1]][0].split(" ", 1)[1],
                     PALETTE_LABELS[k.split("-")[0]][1] + " " + MODE_LABELS[k.split("-")[1]][1].split(" ", 1)[1])
@@ -5811,7 +5884,7 @@ def is_light(key=None):
 
 def theme_from_config(saved):
     """الكونفج القديم: 'light'/'dark' (النسخة اللي فاتت) → رملي دهبي فاتح/غامق. اسم من الـ 11 ثيم بتوع
-    الكونسول القديم: الفاتحة → رملي فاتح والباقي → رملي غامق. مفيش حاجة محفوظة → رملي دهبي غامق."""
+    الكونسول القديم: الفاتحة → رملي فاتح والباقي → رملي غامق. مفيش حاجة محفوظة → جرافيت فضي غامق (الافتراضي)."""
     if saved in PAL:
         return saved
     if saved == "light":
@@ -5819,8 +5892,8 @@ def theme_from_config(saved):
     if saved == "dark":
         return "sand-dark"
     t = core.THEMES.get(saved) if saved else None
-    if t and str(t.get("mode", "")).lower() == "light":
-        return "sand-light"
+    if t:
+        return "sand-light" if str(t.get("mode", "")).lower() == "light" else "sand-dark"
     return DEFAULT_THEME
 
 
@@ -5838,8 +5911,106 @@ def qc(s):
     return QColor(s)
 
 
+LOGO_VARIANT = "grad"   # شكل شعار A2R: grad (المختار) / badge / outline — الاتنين التانيين للمقارنة بس
+
+
+def paint_wordmark(p, pt=15.0, dpr=1.0, variant=None, sub=None, sub_pt=7.5, tail=None, tail_pt=None):
+    """شعار A2R مرسوم بالكود (من غير صور): «A» و«R» بتدرّج من لون الثيم، و«2» باللون التاني،
+    ظل خفيف، وشَرطة متدرجة تحت الحروف. sub = سطر صغير تحته (الإصدار)، tail = كلمة جنبه (CONSOLE في الدخول).
+    بيرجع QPixmap بالـ devicePixelRatio عشان يفضل حاد في 125% و150%."""
+    from PySide6.QtGui import QLinearGradient, QPainterPath, QPen, QFontMetricsF
+    variant = variant or LOGO_VARIANT
+    light = p["mode"] == "light"
+    acc, acc2 = QColor(p["acc"]), QColor(p["acc2"])
+    f = QFont(); f.setFamilies(FONT_FAMILIES); f.setPointSizeF(pt); f.setWeight(QFont.Black)
+    f.setLetterSpacing(QFont.AbsoluteSpacing, pt * 0.06)
+    fm = QFontMetricsF(f)
+    parts = ["A", "2", "R"]
+    adv = [fm.horizontalAdvance(c) for c in parts]
+    tw = sum(adv) + f.letterSpacing() * 2
+    cap = fm.capHeight() if fm.capHeight() > 0 else fm.ascent() * 0.72
+    padx = 6 if variant == "badge" else 3
+    pady = 4 if variant == "badge" else 2
+    bar_h = 0 if variant == "badge" else max(2.0, pt * 0.17)
+    mark_w = tw + padx * 2
+    mark_h = cap + pady * 2 + (bar_h + 3 if bar_h else 0)
+    ft = None
+    if tail:
+        ft = QFont(); ft.setFamilies(FONT_FAMILIES); ft.setPointSizeF(tail_pt or pt * 0.62); ft.setWeight(QFont.Bold)
+        ft.setLetterSpacing(QFont.AbsoluteSpacing, 2.0)
+        tail_w = QFontMetricsF(ft).horizontalAdvance(tail) + 8
+    else:
+        tail_w = 0
+    fs = None
+    if sub:
+        fs = QFont(); fs.setFamilies(FONT_FAMILIES); fs.setPointSizeF(sub_pt); fs.setWeight(QFont.DemiBold)
+        fms = QFontMetricsF(fs)
+        sub_h, sub_w = fms.height() + 1, fms.horizontalAdvance(sub)
+    else:
+        sub_h = sub_w = 0
+    W = max(mark_w + tail_w, sub_w) + 2
+    H = mark_h + sub_h + 2
+    pm = QPixmap(int(W * dpr + 0.999), int(H * dpr + 0.999))
+    pm.setDevicePixelRatio(dpr)
+    pm.fill(Qt.transparent)
+    pa = QPainter(pm)
+    pa.setRenderHint(QPainter.Antialiasing); pa.setRenderHint(QPainter.TextAntialiasing)
+    x0 = (W - (mark_w + tail_w)) / 2 + 1
+    top = 1
+    base = top + pady + cap
+    path_main, path_two = QPainterPath(), QPainterPath()
+    x = x0 + padx
+    for c, a in zip(parts, adv):
+        (path_two if c == "2" else path_main).addText(QPointF(x, base), f, c)
+        x += a + f.letterSpacing()
+    lighter = lambda c, k: c.lighter(k)
+    if variant == "badge":
+        r = QRectF(x0, top, mark_w, cap + pady * 2)
+        g = QLinearGradient(r.topLeft(), r.bottomRight())
+        g.setColorAt(0, lighter(acc, 118)); g.setColorAt(1, acc.darker(112))
+        pa.setPen(Qt.NoPen); pa.setBrush(g); pa.drawRoundedRect(r, 6, 6)
+        on = QColor(p["on_acc"])
+        pa.setBrush(on); pa.drawPath(path_main)
+        two = QColor(on); two.setAlphaF(0.72)
+        pa.setBrush(two); pa.drawPath(path_two)
+    elif variant == "outline":
+        soft = QColor(acc); soft.setAlphaF(0.20 if light else 0.18)
+        pa.setBrush(soft); pa.setPen(QPen(acc, max(1.2, pt * 0.09)))
+        pa.drawPath(path_main)
+        pa.setPen(Qt.NoPen); pa.setBrush(acc2); pa.drawPath(path_two)
+    else:   # grad
+        sh = QColor(0, 0, 0, 40 if light else 110)
+        pa.setPen(Qt.NoPen); pa.setBrush(sh)
+        pa.drawPath(path_main.translated(0.8, 1.2)); pa.drawPath(path_two.translated(0.8, 1.2))
+        g = QLinearGradient(0, top + pady, 0, base)
+        if light:
+            g.setColorAt(0, lighter(acc, 125)); g.setColorAt(1, acc.darker(118))
+        else:
+            g.setColorAt(0, lighter(acc, 135)); g.setColorAt(1, acc.darker(108))
+        pa.setBrush(g); pa.drawPath(path_main)
+        g2 = QLinearGradient(0, top + pady, 0, base)
+        g2.setColorAt(0, lighter(acc2, 125 if light else 130)); g2.setColorAt(1, acc2.darker(115 if light else 105))
+        pa.setBrush(g2); pa.drawPath(path_two)
+    if bar_h:
+        by = base + 3
+        bw = tw * 0.78
+        bx = x0 + padx + (tw - bw) / 2
+        gb = QLinearGradient(bx, 0, bx + bw, 0)
+        gb.setColorAt(0, acc); gb.setColorAt(0.62, acc); gb.setColorAt(0.64, acc2); gb.setColorAt(1, acc2)
+        pa.setPen(Qt.NoPen); pa.setBrush(gb)
+        pa.drawRoundedRect(QRectF(bx, by, bw, bar_h), bar_h / 2, bar_h / 2)
+    if tail:
+        pa.setFont(ft); pa.setPen(QColor(p["text"]))
+        pa.drawText(QPointF(x0 + mark_w + 6, base), tail)
+    if sub:
+        pa.setFont(fs); pa.setPen(QColor(p["muted"]))
+        pa.drawText(QRectF(0, mark_h + 1, W, sub_h), Qt.AlignHCenter | Qt.AlignTop, sub)
+    pa.end()
+    return pm
+
+
 def register_core_themes():
-    """بنضيف الـ 6 ثيمات لقاموس THEMES بتاع الكونسول بنفس المفاتيح اللي الدوال المنقولة بتقراها
+    """بنضيف كل الثيمات (20) لقاموس THEMES بتاع الكونسول بنفس المفاتيح اللي الدوال المنقولة بتقراها
     (success / danger / warning / text_muted / mode ...) — الـ 11 ثيم القديمة بتفضل زي ما هي (مش ظاهرة)."""
     for key, p in PAL.items():
         core.THEMES[key] = {
@@ -5958,6 +6129,19 @@ class ThemeState:
     @classmethod
     def p(cls):
         return PAL[cls.key]
+
+
+def paint_glass_bg(widget):
+    """نفس خلفية النافذة الرئيسية (تدرّج + بقع) لأي نافذة فرعية/رسالة، بتترسم مرة لكل ثيم/مقاس."""
+    rtl = widget.layoutDirection() == Qt.RightToLeft
+    key = (ThemeState.key, widget.width(), widget.height(), rtl)
+    cache = getattr(widget, "_glass_cache", None)
+    if cache is None or cache[0] != key:
+        cache = (key, build_glass_background(ThemeState.key, widget.width(), widget.height(), rtl))
+        widget._glass_cache = cache
+    pa = QPainter(widget)
+    pa.drawPixmap(0, 0, cache[1])
+    pa.end()
 
 
 def build_glass_background(key, w, h, rtl=True):
@@ -6218,6 +6402,8 @@ class Label(QWidget, TkCompat):
         if size:
             f.setPointSizeF(size)
         f.setBold(bold)
+        if not bold:
+            f.setWeight(UI_TEXT_WEIGHT)
         self.lbl.setFont(f)
         self._base_pt = f.pointSizeF()
         self._disp = ""
@@ -6258,6 +6444,8 @@ class Label(QWidget, TkCompat):
             f = self.lbl.font()
             f.setPointSizeF(fnt[1] * 0.75 + 1)
             f.setBold("bold" in fnt)
+            if "bold" not in fnt:
+                f.setWeight(UI_TEXT_WEIGHT)
             self.lbl.setFont(f)
             self._base_pt = f.pointSizeF()
         self._restyle()
@@ -6651,7 +6839,61 @@ class Switch(QCheckBox, TkCompat):
             x = r.left() + 2 if on else r.right() - knob - 2
         pa.setBrush(QColor("#FFFFFF" if (is_light() or not on) else p["on_acc"]))
         pa.drawEllipse(x, r.top() + 2, knob, knob)
+        if self.hasFocus():
+            pa.setBrush(Qt.NoBrush)
+            pa.setPen(QPen(qc(p["acc"]), 1.4))
+            fr = self.rect().adjusted(0, 1, -1, -2)
+            pa.drawRoundedRect(fr, fr.height() / 2, fr.height() / 2)
         pa.end()
+
+
+class RailToggle(QFrame):
+    """صف صغير في الشريط الجانبي: المفتاح نفسه (نفس Switch ونفس الأمر) + اسم قصير. الضغط على الصف كله
+    بيقلب المفتاح زي الضغط عليه بالظبط، والنص الكامل («مزامنة تلقائية: مفعل») في التلميح."""
+    def __init__(self, switch, label, parent=None):
+        super().__init__(parent)
+        self.setObjectName("RailToggle")
+        self.sw = switch
+        self.lab = label
+        self.setCursor(Qt.PointingHandCursor)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(4, 1, 4, 1)
+        lay.setSpacing(4)
+        lay.addWidget(switch, 0, Qt.AlignVCenter)
+        lay.addWidget(label, 1, Qt.AlignVCenter)
+        label._owner = self
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.sw.isEnabled():
+            self.sw.click()
+            self.sw.setFocus(Qt.MouseFocusReason)
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+
+class RailSwLabel(Label):
+    """الـ Label اللي المنطق بيكتب فيه حالة المفتاح (configure(text=..., text_color=...)) — بيعرض اسم قصير
+    يدخل في الشريط، والنص الكامل اللي المنطق كتبه بيروح التلميح. اللون (مفعل/معطل) زي ما المنطق بيحطه."""
+    def __init__(self, short_ar, short_en, size=7.2):
+        self._short = (short_ar, short_en)
+        self._owner = None
+        self._full = ""
+        super().__init__("", size=size, bold=False)
+
+    def configure(self, **kw):
+        if "text" in kw and getattr(self, "_short", None):
+            self._full = str(kw["text"])
+            kw["text"] = T2(*self._short)
+            for x in (self._owner, getattr(self._owner, "sw", None)):
+                if x is not None:
+                    x.setToolTip(self._full)
+        super().configure(**kw)
+
+    def cget(self, key):
+        if key == "text":
+            return self._full
+        return super().cget(key)
 
 
 class Progress(QProgressBar, TkCompat):
@@ -6711,6 +6953,17 @@ class StackButton(Button):
         self._stacked = stacked
         self._rail_role = role
         super().__init__(text, parent, command=command, role=role, icon=icon)
+
+    def setFixedHeight(self, h):
+        self._fixed_h = h
+        super().setFixedHeight(h)
+
+    def event(self, e):
+        r = super().event(e)
+        if e.type() in (QEvent.Polish, QEvent.StyleChange) and getattr(self, "_fixed_h", None):
+            if self.minimumHeight() != self._fixed_h or self.maximumHeight() != self._fixed_h:
+                QWidget.setFixedHeight(self, self._fixed_h)
+        return r
 
     def set_stacked(self, on, flat_role="pill"):
         self._stacked = bool(on)
@@ -6914,22 +7167,211 @@ def _rtl():
     return core.CURRENT_LANG == "ar"
 
 
+class QuietBox(QDialog):
+    """رسالة زي QMessageBox بالظبط (نفس الأزرار والقيم اللي بترجع) لكن من غير صوت ويندوز:
+    QMessageBox بأيقونة معلومات/تحذير/خطأ بيشغّل صوت النظام مع كل رسالة، والكونسول القديم ساكت."""
+    _KIND = {QMessageBox.Information: ("i", "acc"), QMessageBox.Warning: ("!", "warn"),
+             QMessageBox.Critical: ("×", "bad"), QMessageBox.Question: ("?", "acc")}
+
+    def __init__(self, parent, icon, title, msg, buttons, default):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self._result = QMessageBox.No if buttons & QMessageBox.Yes else QMessageBox.Ok
+        p = ThemeState.p()
+        glyph, ck = self._KIND.get(icon, ("i", "acc"))
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(12)
+        row = QHBoxLayout(); row.setSpacing(12)
+        ic = QLabel(self)
+        ic.setFixedSize(30, 30)
+        pm = QPixmap(60, 60); pm.fill(Qt.transparent); pm.setDevicePixelRatio(2.0)
+        pa = QPainter(pm); pa.setRenderHint(QPainter.Antialiasing)
+        c = QColor(p.get(ck, p["acc"]))
+        soft = QColor(c); soft.setAlphaF(0.18)
+        pa.setPen(Qt.NoPen); pa.setBrush(soft); pa.drawEllipse(QRectF(0, 0, 30, 30))
+        pa.setPen(c)
+        ff = QFont(self.font()); ff.setBold(True); ff.setPointSizeF(12)
+        pa.setFont(ff); pa.drawText(QRectF(0, 0, 30, 30), Qt.AlignCenter, glyph)
+        pa.end()
+        ic.setPixmap(pm)
+        row.addWidget(ic, 0, Qt.AlignTop)
+        txt = QLabel(str(msg), self)
+        txt.setWordWrap(True)
+        txt.setTextFormat(Qt.PlainText)
+        txt.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        txt.setMinimumWidth(260)
+        txt.setMaximumWidth(460)
+        txt.setStyleSheet(f"color: {p['text']}; background: transparent;")
+        row.addWidget(txt, 1)
+        lay.addLayout(row)
+        br = QHBoxLayout(); br.setSpacing(6); br.addStretch(1)
+        self._btns = {}
+        order = ([(QMessageBox.Yes, core.T2("نعم", "Yes")), (QMessageBox.No, core.T2("لا", "No"))]
+                 if buttons & QMessageBox.Yes else [(QMessageBox.Ok, core.T2("حسنًا", "OK"))])
+        if default is None:
+            default = order[0][0]
+        for code, label in order:
+            b = Button(label, command=lambda c_=code: self._done(c_), role="primary" if code == default else None)
+            b.setMinimumWidth(78)
+            self._btns[code] = b
+            br.addWidget(b)
+        lay.addLayout(br)
+        self._default = self._btns.get(default)
+        if self._default is not None:
+            self._default.setAutoDefault(True)
+            self._default.setDefault(True)
+
+    def _done(self, code):
+        self._result = code
+        self.accept()
+
+    def paintEvent(self, e):
+        paint_glass_bg(self)
+
+    def keyPressEvent(self, e):
+        if e.key() == Qt.Key_Escape:
+            self._result = QMessageBox.No if QMessageBox.Yes in self._btns else QMessageBox.Ok
+            self.reject()
+            return
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            fw = self.focusWidget()
+            for code, b in self._btns.items():
+                if fw is b:
+                    self._done(code); return
+            if self._default is not None:
+                self._default.click(); return
+        super().keyPressEvent(e)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._default is not None:
+            QTimer.singleShot(0, self._default.setFocus)
+
+    def run(self):
+        self.exec()
+        return self._result
+
+
+class QuietAsk(QDialog):
+    """بديل QInputDialog بنفس ألوان البرنامج: نفس القيمة اللي بترجع (النص أو None لو إلغاء)."""
+    def __init__(self, parent, title, prompt):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
+        self.setWindowFlag(Qt.WindowContextHelpButtonHint, False)
+        self._val = None
+        p = ThemeState.p()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(10)
+        txt = QLabel(prompt, self)
+        txt.setWordWrap(True)
+        txt.setTextFormat(Qt.PlainText)
+        txt.setMinimumWidth(280)
+        txt.setMaximumWidth(460)
+        txt.setStyleSheet(f"color: {p['text']}; background: transparent;")
+        lay.addWidget(txt)
+        self.e = Entry()
+        self.e.setMinimumHeight(30)
+        self.e.bind("<Return>", lambda e: self._ok())
+        lay.addWidget(self.e)
+        br = QHBoxLayout(); br.setSpacing(6); br.addStretch(1)
+        self.b_ok = Button(core.T2("حسنًا", "OK"), command=self._ok, role="primary")
+        self.b_no = Button(core.T2("إلغاء", "Cancel"), command=self.reject)
+        for b in (self.b_ok, self.b_no):
+            b.setMinimumWidth(78)
+            br.addWidget(b)
+        lay.addLayout(br)
+
+    def _ok(self):
+        self._val = self.e.get()
+        self.accept()
+
+    def keyPressEvent(self, e):
+        if e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            self._ok(); return
+        super().keyPressEvent(e)
+
+    def paintEvent(self, e):
+        paint_glass_bg(self)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        QTimer.singleShot(0, self.e.setFocus)
+
+    def run(self):
+        self.exec()
+        return self._val
+
+
 def _mbox(icon, title, msg, parent=None, buttons=QMessageBox.Ok, default=None):
-    box = QMessageBox(_parent_widget(parent))
-    box.setIcon(icon)
-    box.setWindowTitle(strip_emoji_title(str(title)))
-    box.setText(str(msg))
-    box.setStandardButtons(buttons)
-    box.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
-    if buttons & QMessageBox.Yes:
-        box.button(QMessageBox.Yes).setText(core.T2("نعم", "Yes"))
-        box.button(QMessageBox.No).setText(core.T2("لا", "No"))
-    if buttons & QMessageBox.Ok:
-        box.button(QMessageBox.Ok).setText(core.T2("حسنًا", "OK"))
-    if default is not None:
-        box.setDefaultButton(default)
+    box = QuietBox(_parent_widget(parent), icon, strip_emoji_title(str(title)), str(msg), buttons, default)
     box.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-    return box.exec()
+    return box.run()
+
+
+class QuietToast(QWidget):
+    """بديل صامت لإشعار ويندوز من أيقونة الساعة: نافذة صغيرة تحت على اليمين/الشمال، بتختفي لوحدها، من غير صوت."""
+    _inst = None
+
+    def __init__(self):
+        super().__init__(None, Qt.ToolTip | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.WindowDoesNotAcceptFocus)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(14, 10, 14, 11)
+        lay.setSpacing(3)
+        self.t = QLabel(self); self.m = QLabel(self)
+        self.m.setWordWrap(True)
+        for w_ in (self.t, self.m):
+            w_.setTextFormat(Qt.PlainText)
+        lay.addWidget(self.t); lay.addWidget(self.m)
+        self._timer = QTimer(self); self._timer.setSingleShot(True); self._timer.timeout.connect(self.hide)
+
+    def paintEvent(self, e):
+        p = ThemeState.p()
+        pa = QPainter(self); pa.setRenderHint(QPainter.Antialiasing)
+        pa.setPen(QPen(qc(p["border"]), 1)); pa.setBrush(qc(p["solid"]))
+        pa.drawRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), 10, 10)
+        pa.setPen(Qt.NoPen); pa.setBrush(QColor(p["acc"]))
+        x = self.width() - 5 if _rtl() else 2
+        pa.drawRoundedRect(QRectF(x, 10, 3, self.height() - 20), 1.5, 1.5)
+        pa.end()
+
+    def mousePressEvent(self, e):
+        self.hide()
+
+    def show_msg(self, title, msg, ms):
+        p = ThemeState.p()
+        rtl = _rtl()
+        self.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
+        self.t.setText(strip_emoji_title(str(title)))
+        self.m.setText(str(msg))
+        ft = QFont(self.font()); ft.setBold(True); ft.setPointSizeF(9)
+        self.t.setFont(ft)
+        self.t.setStyleSheet(f"color: {p['acc']}; background: transparent;")
+        self.m.setStyleSheet(f"color: {p['text']}; background: transparent;")
+        self.m.setMaximumWidth(320)
+        self.setFixedWidth(min(360, max(220, QFontMetrics(self.m.font()).horizontalAdvance(str(msg)) + 40)))
+        self.adjustSize()
+        scr = QGuiApplication.primaryScreen()
+        g = scr.availableGeometry() if scr else QRect(0, 0, 1280, 720)
+        x = g.left() + 16 if rtl else g.right() - self.width() - 16
+        self.move(x, g.bottom() - self.height() - 16)
+        self.show(); self.raise_()
+        self._timer.start(max(1500, int(ms)))
+
+
+def quiet_toast(title, msg, ms=6000):
+    try:
+        if QuietToast._inst is None:
+            QuietToast._inst = QuietToast()
+        QuietToast._inst.show_msg(title, msg, ms)
+    except Exception as e:
+        core._log_silent("quiet_toast", e)
 
 
 class messagebox:
@@ -6964,16 +7406,9 @@ class filedialog:
 class simpledialog:
     @staticmethod
     def askstring(title="", prompt="", parent=None, **kw):
-        dlg = QInputDialog(_parent_widget(parent))
-        dlg.setWindowTitle(strip_emoji_title(str(title)))
-        dlg.setLabelText(str(prompt))
-        dlg.setLayoutDirection(Qt.RightToLeft if _rtl() else Qt.LeftToRight)
-        dlg.setOkButtonText(core.T2("حسنًا", "OK"))
-        dlg.setCancelButtonText(core.T2("إلغاء", "Cancel"))
-        dlg.setMinimumWidth(320)
-        if dlg.exec():
-            return dlg.textValue()
-        return None
+        dlg = QuietAsk(_parent_widget(parent), strip_emoji_title(str(title)), str(prompt))
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        return dlg.run()
 
 
 def install_dialog_shims():
@@ -7011,6 +7446,9 @@ class Window(QWidget, TkCompat):
 
     def title(self, t):
         self.setWindowTitle(strip_emoji_title(t))
+
+    def paintEvent(self, e):
+        paint_glass_bg(self)
 
     def _escape(self):
         fn = self._binds.get("<Escape>")
@@ -7431,13 +7869,13 @@ from PySide6.QtGui import (QIcon, QFont, QColor, QPainter, QPen, QKeySequence, Q
                            QRegularExpressionValidator, QFontMetrics, QPixmap)
 from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout,
                                QListView, QStyledItemDelegate, QStyle, QAbstractItemView, QSystemTrayIcon, QMenu,
-                               QSizePolicy, QTabWidget, QSplitter, QRadioButton, QButtonGroup, QCheckBox)
+                               QSizePolicy, QTabWidget, QSplitter, QRadioButton, QButtonGroup, QCheckBox, QSpacerItem)
 
 
-APP_TITLE = f"A2R POS Console - {APP_OWNER}"     # اسم النافذة (برضه بيتدوّر عليه لو البرنامج اتفتح مرتين)
-APP_NAME = "A2R POS Console"
+APP_TITLE = f"A2R SYSTEM - {APP_OWNER}"     # اسم النافذة (برضه بيتدوّر عليه لو البرنامج اتفتح مرتين)
+APP_NAME = "A2R SYSTEM"
 FOOT_TEXT = f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria"
-FULL_W, FULL_H = 800, 500
+FULL_W, FULL_H = 800, 472   # كانت 800×500: الأرشفة والمفتاحين اتنقلوا للشريط الجانبي
 RAIL_BTN_H = 46      # كان 40: سطرين في الشريط الجانبي كانوا بيتزنقوا
 MINI_W, MINI_H = 440, 232
 
@@ -7470,7 +7908,7 @@ class LoginGate(Window):
         root.setSpacing(0)
         bar = QFrame()
         bar.setFixedHeight(3)
-        bar.setStyleSheet(f"background:{p['bad']}; border:none;")
+        bar.setStyleSheet(f"background:{p['acc']}; border:none;")
         root.addWidget(bar)
         body = QVBoxLayout()
         body.setContentsMargins(14, 10, 14, 6)
@@ -7478,8 +7916,10 @@ class LoginGate(Window):
         cl = QVBoxLayout(card)
         cl.setContentsMargins(16, 10, 16, 12)
         cl.setSpacing(6)
-        title = Label("A2R POS CONSOLE", size=14, color_key="acc", align=Qt.AlignCenter)
-        title.lbl.setStyleSheet("letter-spacing:1px;")
+        title = QLabel()
+        title.setAccessibleName("A2R SYSTEM")
+        title.setAlignment(Qt.AlignCenter)
+        title.setPixmap(ui.paint_wordmark(p, pt=17, dpr=self.devicePixelRatioF(), tail="SYSTEM", tail_pt=11))
         cl.addWidget(title, 0, Qt.AlignHCenter)
         cl.addWidget(Label(tr("login_prompt"), size=8.5, color_key="muted", align=Qt.AlignCenter), 0, Qt.AlignHCenter)
         self.e_pwd = Entry(show=True, justify="center")
@@ -7492,7 +7932,7 @@ class LoginGate(Window):
         cl.addLayout(hbox(self.e_pwd, self.btn_eye, stretch_at=0))
         self.lbl_err = Label("", size=8.5, color_key="bad", align=Qt.AlignCenter)
         cl.addWidget(self.lbl_err)
-        btn_enter = Button(tr("btn_full_console"), command=self.check_pwd, role="dangerfill", big=True)
+        btn_enter = Button(tr("btn_full_console"), command=self.check_pwd, role="primary", big=True)
         cl.addWidget(btn_enter)
         body.addWidget(card)
         foot = Label(FOOT_TEXT, size=7.5, color_key="muted", align=Qt.AlignCenter)
@@ -7554,6 +7994,8 @@ class OpsModel(QAbstractListModel):
             return f"{r['plate']} {r['amount']}"
         if role == Qt.AccessibleTextRole:
             return f"{r['plate']} — {r['name']} — {r['status']} — {r['amount']} — {r['time']}"
+        if role == Qt.ToolTipRole:
+            return r.get("tip") or None
         return None
 
     def set_rows(self, rows):
@@ -7563,10 +8005,13 @@ class OpsModel(QAbstractListModel):
 
 
 def ops_rows_from_records(records):
-    """كل عمليات اليوم (الأحدث فوق). اللون حسب الحالة: سليم / يدوي / مكرر / ملغي (مشطوب) / ناقص أو وحدة تانية."""
+    """كل عمليات اليوم (الأحدث فوق) — كل عملية كارت بنفس بيانات «عرض السجلات».
+    اللون حسب الحالة: سليم / يدوي / مكرر / ملغي (مشطوب) / ناقص أو وحدة تانية."""
     out = []
-    recs = sorted(records or [], key=lambda r: r.get("dt_key") or datetime.datetime.min, reverse=True)
-    for r in recs:
+    recs = list(records or [])
+    order = sorted(range(len(recs)), key=lambda i: recs[i].get("dt_key") or datetime.datetime.min, reverse=True)
+    for i in order:
+        r = recs[i]
         kind = r.get("kind") or ("void" if r.get("is_void") else ("manual" if r.get("is_manual") else "ok"))
         if r.get("is_void"):
             kind = "void"
@@ -7574,44 +8019,76 @@ def ops_rows_from_records(records):
                "void": T2("ملغي", "Void"), "wrong": T2("وحدة مختلفة", "Other unit"),
                "missing": T2("ناقص", "Incomplete")}.get(kind, "")
         lab = str(r.get("status_text") or lab)   # نفس نص الحالة اللي في «عرض السجلات»
-        tm = str(r.get("time", "") or "")
-        tm = tm[-5:] if len(tm) >= 5 and tm[-3] == ":" else tm
+        full_tm = str(r.get("time", "") or "")
+        tm = full_tm[-5:] if len(full_tm) >= 5 and full_tm[-3] == ":" else full_tm
         name = str(r.get("insured", "") or "-")
         plate = str(r.get("plate", "") or "-")
+        unit = str(r.get("unit", "") or "")
         try:
             amt = f"{float(r.get('amount', 0)):,.2f}"
         except Exception:
             amt = str(r.get("amount", ""))
-        out.append({"kind": kind, "status": lab, "time": tm, "name": name, "plate": plate, "amount": amt})
+        car = " ".join(str(r.get(k, "") or "") for k in ("make", "model") if str(r.get(k, "") or "-") not in ("-", ""))
+        # كل أعمدة «عرض السجلات» في التلميح لما الماوس يقف على الكارت
+        tip_rows = [("col_idx", str(i + 1)), ("col_unit", unit), ("col_plate", plate), ("col_insured", name),
+                    ("col_amount", amt), ("col_time", full_tm), ("col_make", r.get("make", "")),
+                    ("col_model", r.get("model", "")), ("col_chassis", r.get("chassis", "")),
+                    ("col_motor", r.get("motor", "")), ("col_period", r.get("period", "")),
+                    ("col_file", r.get("file", "")), ("col_status", lab)]
+        tip = "\n".join(f"{tr(k)}: {v}" for k, v in tip_rows if str(v or "").strip() not in ("", "-"))
+        out.append({"kind": kind, "status": lab, "time": tm, "name": name, "plate": plate, "amount": amt,
+                    "unit": unit, "idx": i + 1, "car": car, "tip": tip, "rec": r})
     return out
 
 
+def _small_font(base, pt):
+    f = QFont(base)
+    f.setBold(False)
+    f.setWeight(UI_TEXT_WEIGHT)
+    f.setPointSizeF(pt)
+    return f
+
+
 class OpsDelegate(QStyledItemDelegate):
-    ROW_H = 40
+    """كل عملية = كارت: اللوحة والمبلغ / الاسم والوقت / رقمها والوحدة والحالة + زرار «⋯» للاختيارات."""
+    ROW_H = 66
+    MORE_W = 22
 
     def sizeHint(self, option, index):
-        return QSize(option.rect.width(), self.ROW_H)
+        fm1 = QFontMetrics(_small_font(option.font, 8.8))
+        fm2 = QFontMetrics(_small_font(option.font, 7.5))
+        return QSize(option.rect.width(), max(self.ROW_H, fm1.height() + 2 * fm2.height() + 16))
+
+    @staticmethod
+    def geom(rect, rtl):
+        """(مكان الكارت، مكان زرار ⋯، x بتاع الخط الزمني)"""
+        cx = rect.right() - 7 if rtl else rect.left() + 7
+        card = rect.adjusted(3, 3, -17, -3) if rtl else rect.adjusted(17, 3, -3, -3)
+        mw = OpsDelegate.MORE_W
+        if rtl:
+            more = QRect(card.left() + 3, card.bottom() - 19, mw, 17)
+        else:
+            more = QRect(card.right() - 3 - mw, card.bottom() - 19, mw, 17)
+        return card, more, cx
 
     def paint(self, pa, option, index):
-        r = index.data(Qt.UserRole)
+        rows = getattr(index.model(), "rows", None)
+        r = rows[index.row()] if rows is not None and 0 <= index.row() < len(rows) else None
         if not r:
             return
         p = ThemeState.p()
         rect = option.rect
         pa.save()
         pa.setRenderHint(QPainter.Antialiasing)
+        rtl = option.direction == Qt.RightToLeft
         selected = bool(option.state & QStyle.State_Selected)
-        if selected or option.state & QStyle.State_MouseOver:
-            pa.setPen(Qt.NoPen)
-            pa.setBrush(qc(p["sel"] if selected else p["hover"]))
-            pa.drawRoundedRect(QRectF(rect.adjusted(1, 1, -1, -1)), 8, 8)
+        hover = bool(option.state & QStyle.State_MouseOver)
+        card, more, cx = self.geom(rect, rtl)
         # نفس معنى ألوان الكونسول (سجل العمليات): 🟥 مكرر  🟨 ناقص  🟧 وحدة أخرى  🟪 ملغي — بألوان أهدى
         col = QColor({"ok": p["ok"], "manual": p["man"], "dup": p["bad"], "void": p["void"],
                       "wrong": p["wrong"], "missing": p["missing"]}.get(r["kind"], p["muted"]))
-        rtl = option.direction == Qt.RightToLeft
-        # خط زمني: خط رفيع + نقطة ملونة
-        cx = rect.right() - 9 if rtl else rect.left() + 9
-        cy = rect.top() + 14
+        # الخط الزمني
+        cy = card.top() + 14
         line = qc(p["line"] if not is_light() else p["border"])
         pa.setPen(QPen(line, 1.4))
         if index.row() > 0:
@@ -7621,50 +8098,109 @@ class OpsDelegate(QStyledItemDelegate):
         halo = QColor(col); halo.setAlphaF(0.22)
         pa.setPen(Qt.NoPen)
         pa.setBrush(halo)
-        pa.drawEllipse(QPointF(cx, cy), 6.5, 6.5)
+        pa.drawEllipse(QPointF(cx, cy), 6.0, 6.0)
         pa.setBrush(col)
-        pa.drawEllipse(QPointF(cx, cy), 3.6, 3.6)
-        inner = rect.adjusted(6, 3, -22, -3) if rtl else rect.adjusted(22, 3, -6, -3)
-        f_b = QFont(option.font); f_b.setBold(True); f_b.setPointSizeF(8.6)
-        f_s = QFont(option.font); f_s.setBold(False); f_s.setPointSizeF(7.4)
+        pa.drawEllipse(QPointF(cx, cy), 3.4, 3.4)
+        # الكارت
+        cf = QRectF(card).adjusted(0.5, 0.5, -0.5, -0.5)
+        fill = qc(p["sel"]) if selected else qc(p["glass2"])
+        pa.setBrush(fill)
+        edge = QColor(col) if selected else qc(p["border"])
+        if selected:
+            edge.setAlphaF(0.75)
+        pa.setPen(QPen(edge, 1.0))
+        pa.drawRoundedRect(cf, 9, 9)
+        if hover and not selected:
+            pa.setPen(Qt.NoPen)
+            pa.setBrush(qc(p["hover"]))
+            pa.drawRoundedRect(cf, 9, 9)
+        # شريط لون الحالة على حافة الكارت
+        pa.setPen(Qt.NoPen)
+        pa.setBrush(col)
+        sx = card.right() - 4 if rtl else card.left() + 1
+        pa.drawRoundedRect(QRectF(sx, card.top() + 8, 3, card.height() - 16), 1.5, 1.5)
+
+        inner = card.adjusted(8, 5, -10, -5) if rtl else card.adjusted(10, 5, -8, -5)
+        f_b = QFont(option.font); f_b.setBold(True); f_b.setPointSizeF(8.8)
+        f_s = _small_font(option.font, 7.5)
+        f_t = _small_font(option.font, 7.2)
+        fm_b, fm_s, fm_t = QFontMetrics(f_b), QFontMetrics(f_s), QFontMetrics(f_t)
         text_col = qc(p["sel_text"] if selected else p["text"])
         muted = QColor(p["muted"])
-        top = QRect(inner.left(), inner.top(), inner.width(), inner.height() // 2)
-        bot = QRect(inner.left(), inner.top() + inner.height() // 2, inner.width(), inner.height() // 2)
+        h1 = fm_b.height() + 2
+        h2 = fm_s.height() + 1
+        h3 = inner.height() - h1 - h2
+        y1, y2 = inner.top(), inner.top() + h1
+        y3 = y2 + h2
         lead = Qt.AlignRight if rtl else Qt.AlignLeft
         trail = Qt.AlignLeft if rtl else Qt.AlignRight
-        # المبلغ والوقت ناحية، واللوحة/الاسم ناحية
-        fm_b = QFontMetrics(f_b)
-        amt_w = max(fm_b.horizontalAdvance(r["amount"]), 40) + 4
-        if rtl:
-            amt_top = QRect(top.left(), top.top(), amt_w, top.height())
-            amt_bot = QRect(bot.left(), bot.top(), amt_w, bot.height())
-            txt_top = QRect(top.left() + amt_w + 6, top.top(), top.width() - amt_w - 6, top.height())
-            txt_bot = QRect(bot.left() + amt_w + 6, bot.top(), bot.width() - amt_w - 6, bot.height())
-        else:
-            amt_top = QRect(top.right() - amt_w, top.top(), amt_w, top.height())
-            amt_bot = QRect(bot.right() - amt_w, bot.top(), amt_w, bot.height())
-            txt_top = QRect(top.left(), top.top(), top.width() - amt_w - 6, top.height())
-            txt_bot = QRect(bot.left(), bot.top(), bot.width() - amt_w - 6, bot.height())
+
+        def split(y, h, right_w):
+            right_w = min(right_w, inner.width() // 2)
+            if rtl:
+                return (QRect(inner.left() + right_w + 6, y, inner.width() - right_w - 6, h),
+                        QRect(inner.left(), y, right_w, h))
+            return (QRect(inner.left(), y, inner.width() - right_w - 6, h),
+                    QRect(inner.right() - right_w + 1, y, right_w, h))
+
+        # 1) اللوحة ........ المبلغ
+        amt_w = fm_b.horizontalAdvance(r["amount"]) + 4
+        t1, a1 = split(y1, h1, amt_w)
         pa.setFont(f_b)
         pa.setPen(text_col)
-        pa.drawText(txt_top, lead | Qt.AlignVCenter, QFontMetrics(f_b).elidedText(r["plate"], Qt.ElideRight, txt_top.width()))
+        pa.drawText(t1, lead | Qt.AlignVCenter, fm_b.elidedText(r["plate"], Qt.ElideRight, t1.width()))
         if r["kind"] == "void":
             fv = QFont(f_b); fv.setStrikeOut(True); pa.setFont(fv)
             c2 = QColor(text_col); c2.setAlphaF(0.6); pa.setPen(c2)
         elif r["kind"] != "ok":
             pa.setPen(col)
-        pa.drawText(amt_top, trail | Qt.AlignVCenter, r["amount"])
+        pa.drawText(a1, trail | Qt.AlignVCenter, r["amount"])
+        # 2) الاسم ........ الوقت
+        t2, a2 = split(y2, h2, fm_s.horizontalAdvance(r["time"]) + 4)
         pa.setFont(f_s)
+        pa.setPen(text_col if not selected else text_col)
+        nc = QColor(text_col); nc.setAlphaF(0.82); pa.setPen(nc)
+        pa.drawText(t2, lead | Qt.AlignVCenter, fm_s.elidedText(r["name"], Qt.ElideRight, t2.width()))
         pa.setPen(muted)
-        sub = f"{r['name']} · {r['status']}"
-        pa.drawText(txt_bot, lead | Qt.AlignVCenter, QFontMetrics(f_s).elidedText(sub, Qt.ElideRight, txt_bot.width()))
-        pa.drawText(amt_bot, trail | Qt.AlignVCenter, r["time"])
+        pa.drawText(a2, trail | Qt.AlignVCenter, r["time"])
+        # 3) #رقم · الوحدة · العربية ........ [الحالة] ⋯
+        st = r["status"]
+        chip_w = fm_t.horizontalAdvance(st) + 12 if st else 0
+        t3, a3 = split(y3, h3, chip_w + self.MORE_W + 6)
+        bits = [f"#{r['idx']}"] + [b for b in (r.get("unit"), r.get("car")) if b]
+        pa.setFont(f_t)
+        pa.setPen(muted)
+        pa.drawText(t3, lead | Qt.AlignVCenter, fm_t.elidedText(" · ".join(bits), Qt.ElideRight, t3.width()))
+        if st:
+            chip_h = fm_t.height() + 2
+            if rtl:
+                cr = QRectF(a3.left() + self.MORE_W + 4, a3.center().y() - chip_h / 2 + 1, chip_w, chip_h)
+            else:
+                cr = QRectF(a3.right() - self.MORE_W - 4 - chip_w, a3.center().y() - chip_h / 2 + 1, chip_w, chip_h)
+            bgc = QColor(col); bgc.setAlphaF(0.16)
+            pa.setPen(Qt.NoPen); pa.setBrush(bgc)
+            pa.drawRoundedRect(cr, chip_h / 2, chip_h / 2)
+            pa.setPen(col)
+            pa.drawText(cr, Qt.AlignCenter, fm_t.elidedText(st, Qt.ElideRight, int(cr.width()) - 6))
+        # زرار ⋯
+        mr = QRect(more.left(), a3.center().y() - more.height() // 2 + 1, more.width(), more.height())
+        if hover or selected:
+            pa.setPen(Qt.NoPen); pa.setBrush(qc(p["hover"] if not is_light() else p["glass2"]))
+            pa.drawRoundedRect(QRectF(mr), 6, 6)
+        pa.setPen(Qt.NoPen); pa.setBrush(muted if not (hover or selected) else text_col)
+        for k in (-5, 0, 5):
+            pa.drawEllipse(QPointF(mr.center().x() + k + 0.5, mr.center().y() + 0.5), 1.6, 1.6)
         pa.restore()
+
+    @staticmethod
+    def more_rect(option_rect, rtl, row_font):
+        card, more, _cx = OpsDelegate.geom(option_rect, rtl)
+        return card, more
 
 
 class OpsList(QListView):
-    """كل عمليات اليوم في نفس مساحة اللوحة: بكرة الماوس / الاسكرول / الأسهم / PageUp-PageDown / Home / End."""
+    """كل عمليات اليوم في نفس مساحة اللوحة: بكرة الماوس / الاسكرول / الأسهم / PageUp-PageDown / Home / End.
+    زي «عرض السجلات»: ضغطة على الكارت = فتح الإيصال، Enter = فتح، كليك يمين أو «⋯» = كل الاختيارات."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.model_ = OpsModel()
@@ -7674,11 +8210,17 @@ class OpsList(QListView):
         self.setMouseTracking(True)
         self.setSelectionMode(QAbstractItemView.SingleSelection)
         self.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
-        self.verticalScrollBar().setSingleStep(20)
+        self.verticalScrollBar().setSingleStep(22)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setFrameShape(QFrame.NoFrame)
         self.setObjectName("OpsList")
+        self.on_open = None      # fn(rec)
+        self.on_menu = None      # fn(rec, global_pos)
+        self._press_more = False
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._ctx)
+        self.viewport().setCursor(Qt.PointingHandCursor)
 
     def set_rows(self, rows):
         cur = self.currentIndex().row()
@@ -7686,7 +8228,52 @@ class OpsList(QListView):
         self.model_.set_rows(rows)
         if 0 <= cur < len(rows):
             self.setCurrentIndex(self.model_.index(cur))
-            self.verticalScrollBar().setValue(top)
+        self.verticalScrollBar().setValue(top)
+
+    def _rec(self, idx):
+        # من الموديل مباشرة: idx.data() بيرجّع نسخة من القاموس، والإلغاء لازم يتعمل على السجل نفسه
+        rows = self.model_.rows
+        return rows[idx.row()].get("rec") if idx.isValid() and 0 <= idx.row() < len(rows) else None
+
+    def _in_more(self, idx, pos):
+        if not idx.isValid():
+            return False
+        _card, more, _cx = OpsDelegate.geom(self.visualRect(idx), self.layoutDirection() == Qt.RightToLeft)
+        hit = more.adjusted(-4, -6, 4, 6)
+        return hit.contains(pos)
+
+    def _menu_at(self, idx, gpos):
+        rec = self._rec(idx)
+        if rec is not None and self.on_menu:
+            self.setCurrentIndex(idx)
+            self.on_menu(rec, gpos)
+
+    def _ctx(self, pos):
+        idx = self.indexAt(pos)
+        if idx.isValid():
+            self._menu_at(idx, self.viewport().mapToGlobal(pos))
+
+    def mousePressEvent(self, e):
+        idx = self.indexAt(e.position().toPoint())
+        self._press_more = e.button() == Qt.LeftButton and self._in_more(idx, e.position().toPoint())
+        super().mousePressEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        pos = e.position().toPoint()
+        idx = self.indexAt(pos)
+        was_more = self._press_more
+        self._press_more = False
+        super().mouseReleaseEvent(e)
+        if e.button() != Qt.LeftButton or not idx.isValid():
+            return
+        if was_more and self._in_more(idx, pos):
+            vr = self.visualRect(idx)
+            self._menu_at(idx, self.viewport().mapToGlobal(QPoint(pos.x(), vr.bottom())))
+            return
+        if not was_more and idx == self.currentIndex():
+            rec = self._rec(idx)
+            if rec is not None and self.on_open:
+                self.on_open(rec)
 
     def keyPressEvent(self, e):
         n = self.model_.rowCount()
@@ -7698,6 +8285,16 @@ class OpsList(QListView):
             return
         if n and not self.currentIndex().isValid() and e.key() in (Qt.Key_Down, Qt.Key_Up, Qt.Key_PageDown, Qt.Key_PageUp):
             self.setCurrentIndex(self.model_.index(0))
+            return
+        cur = self.currentIndex()
+        if cur.isValid() and e.key() in (Qt.Key_Return, Qt.Key_Enter):
+            rec = self._rec(cur)
+            if rec is not None and self.on_open:
+                self.on_open(rec)
+            return
+        if cur.isValid() and (e.key() == Qt.Key_Menu or (e.key() == Qt.Key_F10 and e.modifiers() & Qt.ShiftModifier)):
+            vr = self.visualRect(cur)
+            self._menu_at(cur, self.viewport().mapToGlobal(vr.center()))
             return
         super().keyPressEvent(e)
 
@@ -7713,9 +8310,10 @@ class TrayAdapter:
         return self.tray.isVisible()
 
     def notify(self, msg, title=APP_NAME):
-        if title == "A2R Console":
+        if title in ("A2R Console", "A2R SYSTEM"):
             title = APP_NAME
-        self.tray.showMessage(title, msg, self.tray.icon(), 6000)
+        # من غير صوت: إشعار ويندوز (showMessage) بيشغّل صوت الإشعارات، فبنعرض نفس الرسالة في نافذة صغيرة صامتة
+        quiet_toast(title, msg, 6000)
 
     def stop(self):
         self.tray.hide()
@@ -7986,10 +8584,15 @@ class MainWindow(QWidget, core.ConsoleLogic):
     def _place(self, w, h):
         scr = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
         # شاشة صغيرة مع تكبير 150%: نضغط المسافات شوية بدل ما الحاجات تركب على بعض
-        self._set_density(compact=(scr.height() - 34 < h and not self.is_mini_mode))
         self.setMinimumSize(0, 0)
         self.setMaximumSize(16777215, 16777215)
         lay = self.layout()
+        compact = scr.height() - 34 < h and not self.is_mini_mode
+        if not compact and not self.is_mini_mode:
+            self._set_density(compact=False)
+            lay.activate()
+            compact = lay.minimumSize().height() > scr.height() - 34
+        self._set_density(compact=compact)
         lay.activate()
         ms = lay.minimumSize()
         # 800×500 زي ما هي، وتكبر بس لو الكلام محتاج (خط الويندوز / تكبير الشاشة)؛ 34 = شريط العنوان
@@ -8003,17 +8606,40 @@ class MainWindow(QWidget, core.ConsoleLogic):
             return
         self._compact = compact
         self.card_dash.setFixedHeight(112 if compact else 128)
-        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_archive_downloads, self.btn_reset):
+        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_reset):
             b.setFixedHeight(48 if compact else 52)
         # الشريط الجانبي: في الشاشة الصغيرة بيبقى أعرض شوية عشان كل اسم يدخل في سطر واحد (الزرار أقصر)
         self.rail.setFixedWidth(108 if compact else 92)
         self._rail_l.setContentsMargins(5, 6 if compact else 8, 5, 6 if compact else 8)
-        for b in (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip):
-            b.setFixedHeight(40 if compact else RAIL_BTN_H)
+        for b in self._rail_buttons():
+            b.setFixedHeight(38 if compact else RAIL_BTN_H)
+        for t in (self.tg_autosync, self.tg_autoprint):
+            t.setFixedHeight(22 if compact else 24)
+        for sp in self._cap_spacers:
+            sp.changeSize(0, 1 if compact else 4)
+        self.b_bar.layout().invalidate()
         if not self.is_mini_mode:
             for b in (self.btn_lang, self.btn_mute):
                 b.setFixedHeight(36 if compact else 40)
+            # شاشة صغيرة بتكبير 150%: الشعار يطلع الهيدر عشان الشريط يساع كل الأزرار
+            self._dock_logo(rail=not compact)
         self._main_col.setSpacing(6 if compact else 8)
+
+    def _rail_buttons(self):
+        return (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip,
+                self.btn_archive_downloads)
+
+    def _dock_logo(self, rail):
+        if rail:
+            if self.lbl_logo.parentWidget() is not self.rail:
+                self._hl.removeWidget(self.lbl_logo)
+                self._rail_l.insertWidget(0, self.lbl_logo)
+        else:
+            if self.lbl_logo.parentWidget() is self.rail:
+                self._rail_l.removeWidget(self.lbl_logo)
+                self._hl.insertWidget(0, self.lbl_logo)
+        self.lbl_logo.show()
+        self._paint_logo()
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
@@ -8081,14 +8707,20 @@ class MainWindow(QWidget, core.ConsoleLogic):
         bl.setContentsMargins(0, 0, 0, 0)
         bl.setSpacing(1)
         self._bar_captions = []  # (label, ar, en)
+        self._cap_spacers = []
 
         def _mk_group(cap_ar, cap_en, buttons):
-            cap = Label(T2(cap_ar, cap_en), size=6.8, bold=False, color_key="muted", align=Qt.AlignCenter)
+            cap = Label(T2(cap_ar, cap_en), size=7, bold=False, color_key="muted", align=Qt.AlignCenter)
+            # العنوان الصغير كان بيتقص في الويندوز («الطباعة»): ارتفاعه = ارتفاع الخط الحقيقي
+            cap.setMinimumHeight(QFontMetrics(cap.lbl.font()).height() + 2)
             self._bar_captions.append((cap, cap_ar, cap_en))
-            bl.addSpacing(4)
+            sp = QSpacerItem(0, 4, QSizePolicy.Minimum, QSizePolicy.Fixed)
+            self._cap_spacers.append(sp)
+            bl.addItem(sp)
             bl.addWidget(cap)
             for b in buttons:
-                b.setFixedHeight(RAIL_BTN_H)
+                if isinstance(b, QWidget) and not isinstance(b, RailToggle):
+                    b.setFixedHeight(RAIL_BTN_H)
                 b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 bl.addWidget(b)
 
@@ -8098,12 +8730,28 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.btn_pdf_export = StackButton("", command=self.export_pdf_summary, role="tileaccent")
         self.btn_excel = StackButton("", command=self.open_excel)
         self.btn_print_slip = StackButton("", command=self.print_slip)
-        for b in (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip):
+        # «أرشفة» (كان كارت في صف الأوامر) + مفتاحين المزامنة والطباعة الفورية (كانوا في كارت المسار):
+        # نفس الكائنات ونفس الأوامر ونفس الحفظ — المكان بس اللي اتغير (طلب أحمد 19:01)
+        self.btn_archive_downloads = StackButton("", command=self.open_downloads_archiver_dialog)
+        self.sw_autosync = Switch(command=self.toggle_autosync)
+        self.lbl_sw_sync = RailSwLabel("مزامنة", "Sync")
+        self.sw_autoprint = Switch(command=self.toggle_autoprint)
+        self.lbl_sw_print = RailSwLabel("طباعة", "Print")
+        for sw in (self.sw_autosync, self.sw_autoprint):
+            sw.setFixedSize(30, 18)
+            sw.setFocusPolicy(Qt.StrongFocus)
+        self.tg_autosync = RailToggle(self.sw_autosync, self.lbl_sw_sync)
+        self.tg_autoprint = RailToggle(self.sw_autoprint, self.lbl_sw_print)
+        for b in (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip,
+                  self.btn_archive_downloads):
             f = b.font(); f.setPointSizeF(7.2); b.setFont(f)
         _mk_group("العرض", "View", [self.btn_view_rec, self.btn_arch_full, self.btn_chrome])
         _mk_group("التقارير", "Reports", [self.btn_excel])
         self._cap_reports = self._bar_captions[-1][0]   # بيستخبى لو الإكسيل مستخبي (مش مشرف)
         _mk_group("الطباعة", "Print", [self.btn_print_slip])
+        _mk_group("الجهاز", "Device", [self.btn_archive_downloads, self.tg_autosync, self.tg_autoprint])
+        for t in (self.tg_autosync, self.tg_autoprint):
+            t.setFixedHeight(24)
         # النسخة دي: زر سجل الأرشيف والإكسيل للمشرف، وبوابة المرور بعد الدخول (unlock_full_console)
         self.btn_arch_full.hide()
         self.btn_excel.hide()
@@ -8112,8 +8760,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self._rail_l.addStretch(1)
         self._rail_sep = _sep(False)
         self._rail_l.addWidget(self._rail_sep)
-        self._rail_tail = QVBoxLayout()
-        self._rail_tail.setSpacing(1)
+        self._rail_tail = QHBoxLayout()
+        self._rail_tail.setSpacing(2)
         self._rail_l.addLayout(self._rail_tail)
         self.btn_lang = StackButton("🌐 عربي", command=self.toggle_language, icon_size=14)
         self.btn_mute = StackButton(("🔇 Muted" if core.SOUND_MUTED else "🔊 Sound"), command=self.toggle_mute, icon_size=14)
@@ -8270,11 +8918,10 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.btn_summary_reopen = StackButton("", command=self.reopen_summary_modal, role="tile")
         self.btn_summary_reopen.hide()
         self.btn_cash = StackButton("", command=self.open_cash_counter, role="tile")
-        self.btn_archive_downloads = StackButton("", command=self.open_downloads_archiver_dialog, role="tile")
         self.btn_reset = StackButton("", command=self.confirm_and_reset, role="tiledanger", icon="reset")
         ag = QHBoxLayout()
         ag.setSpacing(6)
-        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_archive_downloads, self.btn_reset):
+        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_reset):
             b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             b.setFixedHeight(52)
             f = b.font(); f.setPointSizeF(8.4); b.setFont(f)
@@ -8312,12 +8959,6 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.btn_today = Button("", command=self.set_today, role="soft")
         self.btn_yesterday = Button("", command=self.set_yesterday)
         tl.addLayout(hbox(self.lbl_d, self.cb_d, self.cb_m, self.cb_y, self.btn_today, self.btn_yesterday, None))
-        self.sw_autosync = Switch(command=self.toggle_autosync)
-        self.lbl_sw_sync = Label("", size=8)
-        self.sw_autoprint = Switch(command=self.toggle_autoprint)
-        self.lbl_sw_print = Label("", size=8)
-        tl.addStretch(1)
-        tl.addLayout(hbox(self.sw_autosync, self.lbl_sw_sync, 18, self.sw_autoprint, self.lbl_sw_print, None))
         tl.addStretch(1)
         if self.auto_sync_enabled: self.sw_autosync.select()
         else: self.sw_autosync.deselect()
@@ -8334,6 +8975,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.btn_ops_link = Button("", command=self.open_records_viewer, role="link")
         ol.addLayout(hbox(self.lbl_ops_title, None, self.btn_ops_link))
         self.ops_list = OpsList()
+        self.ops_list.on_open = lambda rec: self._rec_open(rec, self)
+        self.ops_list.on_menu = self._ops_menu
         ol.addWidget(self.ops_list, 1)
         self.lbl_ops_empty = Label("", size=8, bold=False, color_key="muted", align=Qt.AlignCenter, wrap=True)
         ol.addWidget(self.lbl_ops_empty)
@@ -8362,11 +9005,14 @@ class MainWindow(QWidget, core.ConsoleLogic):
         hl = self._hl
         if full:
             self._rail_l.insertWidget(0, self.lbl_logo)
+            if getattr(self, "_compact", False):
+                self._dock_logo(rail=False)
             for b in (self.btn_lang, self.btn_mute):
                 b._icon_only = False
                 b.set_stacked(True)
                 b.setFixedHeight(36 if getattr(self, "_compact", False) else 40)   # بعد set_stacked: الستايل كان بيرجّع الارتفاع الأدنى
-                self._rail_tail.addWidget(b)
+                b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                self._rail_tail.addWidget(b, 1)
             self._cap_reports.setVisible(not self.btn_excel.isHidden())
             self._hl.setContentsMargins(8, 0, 8, 0)
             self.clock_pill.layout().setContentsMargins(9, 1, 9, 1)
@@ -8383,6 +9029,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
             hl.insertWidget(0, self.lbl_logo)
             idx = hl.indexOf(self.btn_mode)
             for b in (self.btn_mute, self.btn_lang):
+                b._fixed_h = None
                 b.setMinimumHeight(0)
                 b.setMaximumHeight(16777215)
                 b._icon_only = True   # الهيدر في الميني ضيق: أيقونة بس والكلام في التلميح
@@ -8397,10 +9044,11 @@ class MainWindow(QWidget, core.ConsoleLogic):
 
     def _paint_logo(self):
         p = PAL[ThemeState.key]
-        rail = self.rail.isVisible() or not getattr(self, "is_mini_mode", True)
-        ver = (f'<br><span style="font-size:7.5pt; font-weight:600; color:{p["muted"]}">{APP_VERSION}</span>' if rail else "")
-        self.lbl_logo.setText(f'<span style="font-weight:900; font-size:{15 if rail else 13}pt; letter-spacing:1px; color:{p["acc"]}">A2R</span>'
-                              + ver)
+        rail = (self.rail.isVisible() or not getattr(self, "is_mini_mode", True)) and \
+            self.lbl_logo.parentWidget() is self.rail
+        # شعار مرسوم (تدرّج من لون الثيم + «2» باللون التاني + شَرطة) — بيتغير مع كل ثيم
+        self.lbl_logo.setPixmap(ui.paint_wordmark(p, pt=15 if rail else 12.5, dpr=self.devicePixelRatioF(),
+                                                  sub=APP_VERSION if rail else None))
 
     def paintEvent(self, e):
         rtl = self.layoutDirection() == Qt.RightToLeft
@@ -8441,9 +9089,9 @@ class MainWindow(QWidget, core.ConsoleLogic):
 
     # ---------- الثيم ----------
     def _theme_picked(self, label):
-        # القايمة فيها الألوان التلاتة؛ الفاتح/الغامق من الزرار اللي جنبها
+        # القايمة فيها كل الألوان؛ الفاتح/الغامق من الزرار اللي جنبها
         for pal, (ar, en) in ui.PALETTE_LABELS.items():
-            if label in (ar, en):
+            if label in (ar, en) + ui.PALETTE_SHORT.get(pal, ()):
                 key = pal + "-" + ui.theme_mode(ThemeState.key)
                 if key != ThemeState.key:
                     self.on_theme_select(key)
@@ -8482,9 +9130,10 @@ class MainWindow(QWidget, core.ConsoleLogic):
 
     def _fill_theme_combo(self):
         i = 0 if self.current_lang == "ar" else 1
-        labs = [ui.PALETTE_LABELS[k][i] for k in ui.PALETTES]
+        names = ui.PALETTE_SHORT if self.is_mini_mode else ui.PALETTE_LABELS
+        labs = [names[k][i] for k in ui.PALETTES]
         self.cb_theme.configure(values=labs)
-        self.cb_theme.set(ui.PALETTE_LABELS[ui.theme_palette(ThemeState.key)][i])
+        self.cb_theme.set(names[ui.theme_palette(ThemeState.key)][i])
         fm = QFontMetrics(self.cb_theme.lineEdit().font())
         self.cb_theme.setFixedWidth(max(96, max(fm.horizontalAdvance(x) for x in labs) + 46))
         # الزرار بيوري الوضع اللي هيتحول له
@@ -8523,6 +9172,68 @@ class MainWindow(QWidget, core.ConsoleLogic):
             acts[0].setText(tr("tray_open")); acts[1].setText(tr("tray_console")); acts[3].setText(tr("tray_exit"))
         except Exception:
             pass
+
+    # ---------- اختيارات السجل: دوال واحدة لـ«عرض السجلات» و«آخر العمليات» (نفس السلوك والتأكيدات بالظبط) ----------
+    def _rec_open(self, rec, parent=None):
+        fpath = rec.get("path", "")
+        if fpath and os.path.exists(fpath): _startfile(fpath)
+        else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=parent or self)
+
+    def _rec_reprint(self, rec, parent=None):
+        try: self.reprint_receipt_record(rec)
+        except Exception as e: messagebox.showerror("Error", str(e), parent=parent or self)
+
+    def _rec_open_folder(self, rec, day_folder=None):
+        p = rec.get("path", "") if rec else ""
+        target = os.path.dirname(p) if p and os.path.exists(p) else day_folder
+        if target and os.path.isdir(target): _startfile(target)
+
+    def _rec_void(self, rec, records, parent, done):
+        if rec.get("is_void"):
+            messagebox.showinfo(tr("done"), tr("void_already"), parent=parent)
+            return
+        idx = records.index(rec)
+        msg = tr("void_confirm_msg", idx=idx + 1, amt=rec['amount'])
+        if messagebox.askyesno(tr("void_confirm_title"), msg, parent=parent):
+            self.void_selected_record(rec, done)
+
+    def _rec_restore(self, rec, records, parent, done):
+        if not rec.get("is_void"):
+            messagebox.showinfo(tr("done"), tr("restore_already"), parent=parent)
+            return
+        idx = records.index(rec)
+        msg = tr("restore_confirm_msg", idx=idx + 1, amt=rec['amount'])
+        if messagebox.askyesno(tr("restore_confirm_title"), msg, parent=parent):
+            self.unvoid_selected_record(rec, done)
+
+    @staticmethod
+    def _rec_menu_items(open_fn, reprint_fn, folder_fn, void_fn=None, restore_fn=None):
+        items = [(tr("menu_open_file"), open_fn), (tr("menu_reprint"), reprint_fn),
+                 (T2("📂 فتح الفولدر", "📂 Open folder"), folder_fn)]
+        if void_fn is not None:
+            items += [None, (tr("menu_void_tx"), void_fn), (tr("menu_restore_tx"), restore_fn)]
+        return items
+
+    def _ops_after_change(self):
+        """بعد إلغاء/استرجاع من «آخر العمليات»: القايمة + جدول «عرض السجلات» لو مفتوح يتحدّثوا فورًا."""
+        self._ops_sig = None
+        self._refresh_ops()
+        rv = getattr(self, "_records_win", None)
+        try:
+            if rv is not None and rv.winfo_exists() and getattr(rv, "_rv_refresh", None):
+                rv._rv_refresh()
+        except Exception as _e: _log_silent("_ops_after_change", _e)
+
+    def _ops_menu(self, rec, gpos):
+        """نفس قايمة كليك يمين في «عرض السجلات» (سجلات اليوم): فتح / إعادة طباعة / الفولدر / إلغاء / استرجاع."""
+        recs = self.last_detailed_records or []
+        if rec not in recs:
+            return
+        items = self._rec_menu_items(lambda: self._rec_open(rec, self), lambda: self._rec_reprint(rec, self),
+                                     lambda: self._rec_open_folder(rec, None),
+                                     lambda: self._rec_void(rec, recs, self, self._ops_after_change),
+                                     lambda: self._rec_restore(rec, recs, self, self._ops_after_change))
+        popup_menu(self, items, gpos)
 
     # ---------- «آخر العمليات» ----------
     def _refresh_ops(self):
@@ -9732,21 +10443,15 @@ class MainWindow(QWidget, core.ConsoleLogic):
         def open_selected():
             rec = _sel_rec()
             if not rec: return
-            fpath = rec.get("path", "")
-            if fpath and os.path.exists(fpath): _startfile(fpath)
-            else: messagebox.showerror("Not Found", f"File not found: {rec.get('file', '')}", parent=win)
+            self._rec_open(rec, win)
 
         def reprint_selected():
             rec = _sel_rec()
             if not rec: return
-            try: self.reprint_receipt_record(rec)
-            except Exception as e: messagebox.showerror("Error", str(e), parent=win)
+            self._rec_reprint(rec, win)
 
         def open_folder():
-            rec = _sel_rec()
-            p = rec.get("path", "") if rec else ""
-            target = os.path.dirname(p) if p and os.path.exists(p) else day_folder
-            if target and os.path.isdir(target): _startfile(target)
+            self._rec_open_folder(_sel_rec(), day_folder)
 
         def open_day_summary():
             if not day_folder: return
@@ -9757,24 +10462,12 @@ class MainWindow(QWidget, core.ConsoleLogic):
         def cancel_selected():
             rec = _sel_rec()
             if not rec: return
-            if rec.get("is_void"):
-                messagebox.showinfo(tr("done"), tr("void_already"), parent=win)
-                return
-            idx = records.index(rec)
-            msg = tr("void_confirm_msg", idx=idx + 1, amt=rec['amount'])
-            if messagebox.askyesno(tr("void_confirm_title"), msg, parent=win):
-                self.void_selected_record(rec, refresh)
+            self._rec_void(rec, records, win, refresh)
 
         def restore_selected_void():
             rec = _sel_rec()
             if not rec: return
-            if not rec.get("is_void"):
-                messagebox.showinfo(tr("done"), tr("restore_already"), parent=win)
-                return
-            idx = records.index(rec)
-            msg = tr("restore_confirm_msg", idx=idx + 1, amt=rec['amount'])
-            if messagebox.askyesno(tr("restore_confirm_title"), msg, parent=win):
-                self.unvoid_selected_record(rec, refresh)
+            self._rec_restore(rec, records, win, refresh)
 
         def export_day_excel():
             try: dd_x = datetime.date.fromisoformat(day_iso)
@@ -9836,10 +10529,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         tree.bind("<Double-1>", lambda e: open_selected())
 
         def show_row_menu(iid, pos):
-            items = [(tr("menu_open_file"), open_selected), (tr("menu_reprint"), reprint_selected),
-                     (T2("📂 فتح الفولدر", "📂 Open folder"), open_folder)]
-            if live:
-                items += [None, (tr("menu_void_tx"), cancel_selected), (tr("menu_restore_tx"), restore_selected_void)]
+            items = self._rec_menu_items(open_selected, reprint_selected, open_folder,
+                                         cancel_selected if live else None, restore_selected_void if live else None)
             popup_menu(win, items, pos)
         tree.set_context_menu(show_row_menu)
         win.bind("<Escape>", lambda e: win.destroy())
@@ -9882,6 +10573,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         search_entry.bind("<KeyRelease>", refresh)
         amt_entry.bind("<KeyRelease>", refresh)
         refresh()
+        if live:
+            win._rv_refresh = refresh   # «آخر العمليات» بتحدّث الجدول ده لو اتعمل إلغاء/استرجاع منها
         win.show(); win.raise_(); win.activateWindow()
         QTimer.singleShot(20, search_entry.setFocus)
 
@@ -10382,10 +11075,7 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setQuitOnLastWindowClosed(False)
-    f = QFont()
-    f.setFamilies(ui.FONT_FAMILIES)
-    f.setPointSizeF(9)
-    app.setFont(f)
+    app.setFont(ui.app_base_font(9))
     ui.register_core_themes()
     ui.install_dialog_shims()
     core.ElevateLoginGate = LoginGate
