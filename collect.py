@@ -5721,59 +5721,135 @@ import re
 import threading
 import weakref
 
-from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, QEvent, QObject, Signal
+from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, QEvent, QObject, Signal, QRect, QRectF, QPointF
 from PySide6.QtGui import (QIcon, QPixmap, QPainter, QColor, QFont, QKeySequence, QShortcut, QAction,
-                           QGuiApplication)
+                           QGuiApplication, QPen, QFontMetrics)
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QLineEdit, QComboBox, QCheckBox,
                                QProgressBar, QFrame, QHBoxLayout, QVBoxLayout, QMessageBox, QFileDialog,
                                QInputDialog, QTreeWidget, QTreeWidgetItem, QHeaderView, QAbstractItemView,
-                               QMenu, QSizePolicy, QStyle)
+                               QMenu, QSizePolicy, QStyle, QStyleOptionButton, QStylePainter)
 
 
 FONT_FAMILIES = ["Segoe UI", "Noto Sans Arabic", "Noto Sans", "Tahoma", "Arial"]
 
-# ───────────────────────── الثيمين ─────────────────────────
-# option-1 (أبيض/أزرق) و option-2 (أسود/ليموني) من الموكاب v2
+# ───────────────────────── الثيمات: 3 ألوان × (فاتح / غامق) — شكل زجاجي هادي ─────────────────────────
+# الترتيب: رملي دهبي (الافتراضي) / مريمية / لافندر. كل ثيم فيه:
+#   grad + blobs: الخلفية (بتترسم مرة واحدة كصورة) — card/glass2/edge: الكروت الشفافة
+#   solid/bg/sub: ألوان مصمتة للنوافذ الفرعية والقوايم المنسدلة
+def _pal(mode, grad, blobs, bo, solid_bg, solid_card, sub, text, muted, acc, acc_hover, on_acc, line, bad, odd, acc2):
+    light = mode == "light"
+    a = QColor(acc)
+    acc_rgba = lambda al: f"rgba({a.red()},{a.green()},{a.blue()},{al})"
+    st = (dict(ok="#2F8A5F", man="#3F6FC4", bad=bad, warn="#A8781E", void="#8463C0", wrong="#C46A2F", missing="#A88A22")
+          if light else
+          dict(ok="#6CC39A", man="#7EA6EA", bad=bad, warn="#E3B25A", void="#B59AE3", wrong="#E9A06E", missing="#DCC061"))
+
+    def soft(c, al):
+        q = QColor(c)
+        return f"rgba({q.red()},{q.green()},{q.blue()},{al})"
+    glass = "rgba(255,255,255,0.60)" if light else "rgba(255,255,255,0.055)"
+    glass2 = "rgba(255,255,255,0.74)" if light else "rgba(255,255,255,0.085)"
+    edge = "rgba(255,255,255,0.92)" if light else "rgba(255,255,255,0.11)"
+    return dict(
+        mode=mode, grad=grad, blobs=blobs, bo=bo,
+        bg=solid_bg, solid=solid_card, sub=sub, card=glass, glass2=glass2, edge=edge, line=line,
+        border=line if light else edge, text=text, muted=muted, acc=acc, acc_hover=acc_hover,
+        acc_soft=acc_rgba(0.14 if light else 0.16), on_acc=on_acc, hero=glass, hero_text=text, hero_muted=muted,
+        input=glass2, ok=st["ok"], ok_soft=soft(st["ok"], 0.14), warn=st["warn"], warn_soft=soft(st["warn"], 0.14),
+        bad=st["bad"], bad_soft=soft(st["bad"], 0.14), man=st["man"], man_soft=soft(st["man"], 0.14),
+        void=st["void"], wrong=st["wrong"], missing=st["missing"],
+        track=("rgba(0,0,0,0.10)" if light else "rgba(255,255,255,0.12)"), fill=acc,
+        sel=acc_rgba(0.22 if light else 0.24), sel_text=text, link=acc,
+        hover=("rgba(255,255,255,0.55)" if light else "rgba(255,255,255,0.06)"),
+        acc2=acc2, acc2_soft=soft(acc2, 0.16 if light else 0.14), acc2_edge=soft(acc2, 0.55 if light else 0.45),
+        rail=("rgba(255,255,255,0.42)" if light else "rgba(255,255,255,0.045)"), odd=odd,
+    )
+
+
 PAL = {
-    "light": dict(bg="#F3F4F6", card="#FFFFFF", sub="#FFFFFF", border="#E5E7EB", text="#1F2937", muted="#6B7280",
-                  acc="#2563EB", acc_hover="#1D4ED8", acc_soft="#EFF6FF", on_acc="#FFFFFF", hero="#2563EB",
-                  hero_text="#FFFFFF", hero_muted="#DBEAFE", input="#F9FAFB", ok="#047857", ok_soft="#ECFDF5",
-                  warn="#B45309", warn_soft="#FFFBEB", bad="#B91C1C", bad_soft="#FEF2F2", man="#1D4ED8",
-                  man_soft="#EFF6FF", track="#E5E7EB", fill="#10B981", sel="#DBEAFE", sel_text="#1E3A8A",
-                  link="#2563EB", hover="#F3F4F6"),
-    "dark": dict(bg="#0B0F14", card="#121A23", sub="#0F151C", border="#1C2530", text="#E6EDF3", muted="#8B98A5",
-                 acc="#C6F432", acc_hover="#B4E21F", acc_soft="#1A232E", on_acc="#0B0F14", hero="#121A23",
-                 hero_text="#FFFFFF", hero_muted="#8B98A5", input="#0F151C", ok="#C6F432", ok_soft="#1A2A10",
-                 warn="#F59E0B", warn_soft="#2A2010", bad="#F43F5E", bad_soft="#2A1218", man="#38BDF8",
-                 man_soft="#0F2230", track="#1C2530", fill="#C6F432", sel="#26331A", sel_text="#E6EDF3",
-                 link="#C6F432", hover="#17212C"),
+    "sand-dark": _pal("dark", ("#15130F", "#181613", "#121619"), ("#4A3D22", "#332E27", "#22303A"), 0.70,
+                      "#17150F", "#221F19", "#1C1A15", "#EFE9DC", "#A39A87", "#D4B56C", "#C6A65B", "#1A160E",
+                      "rgba(255,255,255,0.08)", "#E8938C", "#26231C", "#7FBFB0"),
+    "sand-light": _pal("light", ("#F6F2EA", "#F3EFE8", "#EEF0F1"), ("#EAD8B3", "#DDD2C3", "#CFD9DE"), 0.60,
+                       "#F3EFE7", "#FBF9F5", "#F7F4EE", "#2E2A22", "#7A7262", "#A7843A", "#957432", "#FFFFFF",
+                       "rgba(110,90,50,0.16)", "#C0605A", "#F6F2EA", "#3C8A7A"),
+    "sage-dark": _pal("dark", ("#111716", "#141A1E", "#17181A"), ("#22433A", "#273A4F", "#3A3627"), 0.70,
+                      "#131918", "#1D2524", "#171E1D", "#E4EBE8", "#93A39D", "#8CC2B2", "#7AB3A2", "#0F1A17",
+                      "rgba(255,255,255,0.08)", "#E78F8F", "#212A29", "#D9B66E"),
+    "sage-light": _pal("light", ("#EDF2F0", "#F1F3F5", "#F4F2EC"), ("#BDD5CC", "#C8D4E2", "#E2DCCB"), 0.60,
+                       "#EEF2F0", "#FAFCFB", "#F4F7F6", "#22302C", "#66756F", "#4F8576", "#43725F", "#FFFFFF",
+                       "rgba(60,90,80,0.16)", "#C45F5F", "#F1F5F3", "#A27A2E"),
+    "lav-dark": _pal("dark", ("#13161F", "#191A28", "#141C22"), ("#2E3B6A", "#3C3060", "#1F4746"), 0.70,
+                     "#151724", "#1F2232", "#191B2A", "#E6E8F2", "#9AA0B8", "#98A6E6", "#8796D9", "#151826",
+                     "rgba(255,255,255,0.08)", "#EB8C98", "#23263A", "#7FC4B8"),
+    "lav-light": _pal("light", ("#EDF0F8", "#F2EFF7", "#F6F2EA"), ("#BFCBEF", "#DCCDEE", "#EFDFC0"), 0.55,
+                      "#EEF0F7", "#FBFBFE", "#F5F5FB", "#262B3F", "#6A7088", "#6476C4", "#5466B3", "#FFFFFF",
+                      "rgba(80,90,130,0.16)", "#C85B6B", "#F2F3FA", "#2F8576"),
 }
-THEME_LABELS = {"light": ("فاتح", "Light"), "dark": ("غامق", "Dark")}
+DEFAULT_THEME = "sand-dark"
+PALETTES = ("sand", "sage", "lav")
+PALETTE_LABELS = {"sand": ("رملي دهبي", "Sand gold"), "sage": ("مريمية", "Sage"), "lav": ("لافندر", "Lavender")}
+MODE_LABELS = {"light": ("☀ فاتح", "☀ Light"), "dark": ("🌙 غامق", "🌙 Dark")}
+THEME_LABELS = {k: (PALETTE_LABELS[k.split("-")[0]][0] + " " + MODE_LABELS[k.split("-")[1]][0].split(" ", 1)[1],
+                    PALETTE_LABELS[k.split("-")[0]][1] + " " + MODE_LABELS[k.split("-")[1]][1].split(" ", 1)[1])
+                for k in PAL}
+
+
+def theme_palette(key):
+    return (key if key in PAL else DEFAULT_THEME).split("-")[0]
+
+
+def theme_mode(key):
+    return (key if key in PAL else DEFAULT_THEME).split("-")[1]
+
+
+def is_light(key=None):
+    k = ThemeState.key if key is None else key
+    return PAL.get(k, PAL[DEFAULT_THEME])["mode"] == "light"
 
 
 def theme_from_config(saved):
-    """الكونفج القديم كان فيه اسم ثيم من الـ 11: الفاتحة → light وأي حاجة تانية (أو مفيش) → dark."""
-    if saved in ("light", "dark"):
+    """الكونفج القديم: 'light'/'dark' (النسخة اللي فاتت) → رملي دهبي فاتح/غامق. اسم من الـ 11 ثيم بتوع
+    الكونسول القديم: الفاتحة → رملي فاتح والباقي → رملي غامق. مفيش حاجة محفوظة → رملي دهبي غامق."""
+    if saved in PAL:
         return saved
+    if saved == "light":
+        return "sand-light"
+    if saved == "dark":
+        return "sand-dark"
     t = core.THEMES.get(saved) if saved else None
     if t and str(t.get("mode", "")).lower() == "light":
-        return "light"
-    return "dark"
+        return "sand-light"
+    return DEFAULT_THEME
+
+
+def qc(s):
+    """لون من النص: '#RRGGBB' أو 'rgba(r,g,b,a)' (QColor مبيقراش rgba لوحده)."""
+    s = str(s).strip()
+    if s.startswith("rgba"):
+        try:
+            r, g, b, a = [x.strip() for x in s[s.index("(") + 1:s.rindex(")")].split(",")]
+            c = QColor(int(r), int(g), int(b))
+            c.setAlphaF(float(a))
+            return c
+        except Exception:
+            return QColor(0, 0, 0, 0)
+    return QColor(s)
 
 
 def register_core_themes():
-    """بنضيف 'light' و'dark' لقاموس THEMES بتاع الكونسول بنفس المفاتيح اللي الدوال المنقولة بتقراها
+    """بنضيف الـ 6 ثيمات لقاموس THEMES بتاع الكونسول بنفس المفاتيح اللي الدوال المنقولة بتقراها
     (success / danger / warning / text_muted / mode ...) — الـ 11 ثيم القديمة بتفضل زي ما هي (مش ظاهرة)."""
     for key, p in PAL.items():
         core.THEMES[key] = {
-            "mode": "Light" if key == "light" else "Dark",
-            "bg": p["bg"], "card": p["card"], "sub_card": p["sub"], "border": p["border"], "input": p["input"],
+            "mode": "Light" if p["mode"] == "light" else "Dark",
+            "bg": p["bg"], "card": p["solid"], "sub_card": p["sub"], "border": p["border"], "input": p["solid"],
             "text": p["text"], "text_muted": p["muted"], "primary": p["acc"], "primary_hover": p["acc_hover"],
             "success": p["ok"], "danger": p["bad"], "warning": p["warn"], "accent": p["acc"],
-            "secondary": p["card"], "secondary_hover": p["hover"], "success_btn": p["card"],
-            "success_btn_hover": p["hover"], "tool": p["card"], "tool_hover": p["hover"], "warn_btn": p["card"],
-            "warn_btn_hover": p["hover"], "danger_btn": p["bad"], "danger_btn_hover": p["bad"],
+            "secondary": p["solid"], "secondary_hover": p["sub"], "success_btn": p["solid"],
+            "success_btn_hover": p["sub"], "tool": p["solid"], "tool_hover": p["sub"], "warn_btn": p["solid"],
+            "warn_btn_hover": p["sub"], "danger_btn": p["bad"], "danger_btn_hover": p["bad"],
         }
 
 
@@ -5793,80 +5869,131 @@ def _arrow_file(color):
 
 def build_qss(key):
     p = PAL[key]
+    L = p["mode"] == "light"
     return f"""
-QWidget#Root, QWidget#Win {{ background: {p['bg']}; color: {p['text']}; }}
+QWidget#Root {{ background: transparent; color: {p['text']}; }}
+QWidget#Win {{ background: {p['bg']}; color: {p['text']}; }}
 QLabel {{ color: {p['text']}; background: transparent; }}
 QLabel[muted="true"] {{ color: {p['muted']}; }}
-QToolTip {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
-QFrame#Header {{ background: {p['sub']}; border: none; border-bottom: 1px solid {p['border']}; }}
-QFrame#Card {{ background: {p['card']}; border: 1px solid {p['border']}; border-radius: 12px; }}
-QFrame#Hero {{ background: {p['hero']}; border: {'none' if key == 'light' else '1px solid ' + p['border']}; border-radius: 12px; }}
-QFrame#Pill {{ background: {p['input']}; border: 1px solid {p['border']}; border-radius: 8px; }}
-QFrame#VSep {{ background: {p['border']}; max-width: 1px; min-width: 1px; border: none; }}
-QFrame#HSep {{ background: {p['border']}; max-height: 1px; min-height: 1px; border: none; }}
-QFrame#Role {{ border-radius: 11px; border: 1px solid {p['bad']}; background: {p['bad_soft']}; }}
-QPushButton {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 8px;
+QToolTip {{ background: {p['solid']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
+QFrame#Header {{ background: {p['sub']}; border: none; border-bottom: 1px solid {p['line']}; }}
+QFrame#Card, QFrame#Hero {{ background: {p['card']}; border: 1px solid {p['edge']}; border-radius: 14px; }}
+QFrame#GlassBar {{ background: {p['card']}; border: 1px solid {p['edge']}; border-radius: 14px; }}
+QFrame#Rail {{ background: {p['rail']}; border: 1px solid {p['edge']}; border-radius: 16px; }}
+QFrame#Pill {{ background: {p['glass2']}; border: 1px solid {p['border']}; border-radius: 8px; }}
+QFrame#VSep {{ background: {p['line']}; max-width: 1px; min-width: 1px; border: none; }}
+QFrame#HSep {{ background: {p['line']}; max-height: 1px; min-height: 1px; border: none; }}
+QFrame#Role {{ border-radius: 12px; border: 1px solid {p['bad']}; background: {p['bad_soft']}; }}
+QPushButton {{ background: {p['glass2']}; color: {p['text']}; border: 1px solid {p['edge'] if L else p['border']}; border-radius: 8px;
                padding: 0 10px; min-height: 26px; font-weight: 700; }}
-QPushButton:hover {{ background: {p['hover']}; }}
+QPushButton:hover {{ background: {p['hover']}; border: 1px solid {p['acc_soft']}; }}
 QPushButton:focus {{ border: 1px solid {p['acc']}; }}
-QPushButton:disabled {{ color: {p['muted']}; background: {p['input']}; border: 1px solid {p['border']}; }}
+QPushButton:disabled {{ color: {p['muted']}; background: {p['card']}; border: 1px solid {p['border']}; }}
 QPushButton[role="primary"] {{ background: {p['acc']}; color: {p['on_acc']}; border: none; }}
 QPushButton[role="primary"]:hover {{ background: {p['acc_hover']}; }}
+QPushButton[role="primary"]:focus {{ border: 1px solid {p['text']}; }}
 QPushButton[role="primary"]:disabled {{ background: {p['track']}; color: {p['muted']}; }}
-QPushButton[role="soft"] {{ background: {p['acc_soft']}; color: {p['acc'] if key == 'light' else p['text']}; }}
+QPushButton[role="soft"] {{ background: {p['acc_soft']}; color: {p['text']}; }}
 QPushButton[role="danger"] {{ background: transparent; color: {p['bad']}; border: 1px solid {p['bad']}; }}
 QPushButton[role="danger"]:hover {{ background: {p['bad_soft']}; }}
 QPushButton[role="dangerfill"] {{ background: {p['bad']}; color: #FFFFFF; border: none; }}
-QPushButton[role="pill"] {{ background: {p['input']}; min-height: 24px; padding: 0 8px; font-weight: 600; }}
-QPushButton[role="link"] {{ background: transparent; border: none; color: {p['link']}; padding: 0 2px; min-height: 16px; font-weight: 700; }}
+QPushButton[role="pill"] {{ background: {p['glass2']}; min-height: 24px; padding: 0 10px; border-radius: 12px; font-weight: 600; }}
+QPushButton[role="link"] {{ background: transparent; border: none; color: {p['link']}; padding: 0 2px; min-height: 18px; font-weight: 700; }}
 QPushButton[role="link"]:hover {{ text-decoration: underline; }}
-QPushButton[big="true"] {{ min-height: 32px; border-radius: 10px; font-size: 10pt; }}
-QLineEdit, QComboBox {{ background: {p['input']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 8px;
+QPushButton[role="rail"] {{ background: transparent; border: 1px solid transparent; border-radius: 10px; padding: 0 2px; font-weight: 600; }}
+QPushButton[role="rail"]:hover {{ background: {p['acc_soft']}; border: 1px solid transparent; }}
+QPushButton[role="rail"]:focus {{ border: 1px solid {p['acc']}; }}
+QPushButton[role="tile"], QPushButton[role="tiledanger"] {{ background: {p['card']}; border: 1px solid {p['edge']}; border-radius: 12px; padding: 0 2px; }}
+QPushButton[role="tile"]:hover, QPushButton[role="tiledanger"]:hover {{ background: {p['hover']}; }}
+QPushButton[role="tile"]:focus, QPushButton[role="tiledanger"]:focus {{ border: 1px solid {p['acc']}; }}
+QPushButton[role="tiledanger"] {{ color: {p['bad']}; }}
+QPushButton[role="tileaccent"] {{ background: {p['acc2_soft']}; border: 1px solid {p['acc2_edge']}; border-radius: 12px; padding: 0 2px; color: {p['acc2']}; }}
+QPushButton[role="tileaccent"]:hover {{ background: {p['acc2_edge']}; }}
+QPushButton[role="tileaccent"]:focus {{ border: 1px solid {p['acc2']}; }}
+QPushButton[big="true"] {{ min-height: 32px; border-radius: 11px; }}
+QLineEdit, QComboBox {{ background: {p['glass2']}; color: {p['text']}; border: 1px solid {p['border']}; border-radius: 8px;
                         padding: 0 8px; min-height: 26px; selection-background-color: {p['acc']}; selection-color: {p['on_acc']}; font-weight: 600; }}
 QLineEdit:focus, QComboBox:focus {{ border: 1px solid {p['acc']}; }}
 QLineEdit:disabled, QComboBox:disabled {{ color: {p['muted']}; }}
 QComboBox::drop-down {{ border: none; width: 18px; }}
 QComboBox::down-arrow {{ image: url({_arrow_file(p['muted'])}); width: 10px; height: 10px; margin: 0 4px; }}
-QComboBox QAbstractItemView {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']};
+QComboBox QAbstractItemView {{ background: {p['solid']}; color: {p['text']}; border: 1px solid {p['border']};
                                selection-background-color: {p['sel']}; selection-color: {p['sel_text']}; outline: 0; }}
 QCheckBox {{ color: {p['text']}; font-weight: 700; spacing: 6px; }}
-QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid {p['border']}; background: {p['input']}; }}
+QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid {p['border']}; background: {p['glass2']}; }}
 QCheckBox::indicator:checked {{ background: {p['acc']}; border: 1px solid {p['acc']}; }}
 QProgressBar {{ background: {p['track']}; border: none; border-radius: 3px; max-height: 6px; min-height: 6px; }}
 QProgressBar::chunk {{ background: {p['fill']}; border-radius: 3px; }}
-QTreeWidget, QListView {{ background: {p['card']}; color: {p['text']}; border: none; outline: 0;
+QTreeWidget, QListView {{ background: {p['solid']}; color: {p['text']}; border: none; outline: 0;
                           selection-background-color: {p['sel']}; selection-color: {p['sel_text']}; }}
+QListView#OpsList {{ background: transparent; }}
 QTreeWidget::item {{ min-height: 26px; }}
 QTreeWidget::item:selected {{ background: {p['sel']}; color: {p['sel_text']}; }}
-QHeaderView::section {{ background: {p['sub']}; color: {p['muted']}; border: none; border-bottom: 1px solid {p['border']};
+QHeaderView::section {{ background: {p['sub']}; color: {p['muted']}; border: none; border-bottom: 1px solid {p['line']};
                         padding: 4px 6px; font-weight: 800; }}
 QScrollBar:vertical {{ background: transparent; width: 9px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: {p['border']}; border-radius: 4px; min-height: 24px; }}
+QScrollBar::handle:vertical {{ background: {p['track']}; border-radius: 4px; min-height: 24px; }}
 QScrollBar::handle:vertical:hover {{ background: {p['muted']}; }}
 QScrollBar:horizontal {{ background: transparent; height: 9px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: {p['border']}; border-radius: 4px; min-width: 24px; }}
+QScrollBar::handle:horizontal {{ background: {p['track']}; border-radius: 4px; min-width: 24px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QTabWidget::pane {{ border: none; }}
-QTabBar::tab {{ background: {p['card']}; color: {p['muted']}; border: 1px solid {p['border']}; padding: 6px 14px; margin: 0 2px;
+QTabBar::tab {{ background: {p['solid']}; color: {p['muted']}; border: 1px solid {p['border']}; padding: 6px 14px; margin: 0 2px;
                 border-radius: 8px; font-weight: 700; }}
 QTabBar::tab:selected {{ background: {p['acc']}; color: {p['on_acc']}; border: 1px solid {p['acc']}; }}
-QSplitter::handle {{ background: {p['border']}; width: 6px; }}
-QMenu {{ background: {p['card']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
+QSplitter::handle {{ background: {p['line']}; width: 6px; }}
+QMenu {{ background: {p['solid']}; color: {p['text']}; border: 1px solid {p['border']}; padding: 4px; }}
 QMenu::item {{ padding: 6px 18px; border-radius: 6px; }}
 QMenu::item:selected {{ background: {p['sel']}; color: {p['sel_text']}; }}
-QMenu::separator {{ height: 1px; background: {p['border']}; margin: 4px 6px; }}
+QMenu::separator {{ height: 1px; background: {p['line']}; margin: 4px 6px; }}
 QRadioButton {{ color: {p['text']}; font-weight: 700; }}
 QMessageBox, QInputDialog {{ background: {p['bg']}; }}
 """
 
 
 class ThemeState:
-    key = "dark"
+    key = DEFAULT_THEME
 
     @classmethod
     def p(cls):
         return PAL[cls.key]
+
+
+def build_glass_background(key, w, h, rtl=True):
+    """الخلفية الزجاجية: تدرّج + 3 بقع لون ناعمة. بتترسم مرة واحدة كصورة (مع تغيير الثيم/المقاس بس)،
+    مفيش blur حقيقي ولا acrylic من الويندوز عشان الأجهزة الضعيفة."""
+    from PySide6.QtGui import QLinearGradient, QRadialGradient
+    p = PAL[key]
+    pm = QPixmap(max(1, w), max(1, h))
+    pa = QPainter(pm)
+    pa.setRenderHint(QPainter.Antialiasing)
+    g = QLinearGradient(0, 0, w, h)
+    g.setColorAt(0.0, QColor(p["grad"][0]))
+    g.setColorAt(0.55, QColor(p["grad"][1]))
+    g.setColorAt(1.0, QColor(p["grad"][2]))
+    pa.fillRect(0, 0, w, h, g)
+    sx, sy = w / 800.0, h / 500.0
+    # (عرض، طول، مسافة من اليمين، مسافة من فوق) زي الموكاب
+    blobs = ((320, 300, 160, -90), (280, 260, 800 - 230, 500 - 180), (240, 220, 40, 230))
+    for (bw, bh, right, top), col in zip(blobs, p["blobs"]):
+        cx = (800 - right - bw / 2) * sx
+        if not rtl:
+            cx = w - cx
+        cy = (top + bh / 2) * sy
+        rad = (max(bw, bh) / 2 + 60) * max(sx, sy)
+        rg = QRadialGradient(cx, cy, rad)
+        c0 = QColor(col); c0.setAlphaF(p["bo"])
+        c1 = QColor(col); c1.setAlphaF(p["bo"] * 0.55)
+        c2 = QColor(col); c2.setAlphaF(0.0)
+        rg.setColorAt(0.0, c0)
+        rg.setColorAt(0.45, c1)
+        rg.setColorAt(1.0, c2)
+        pa.setPen(Qt.NoPen)
+        pa.setBrush(rg)
+        pa.drawEllipse(QRectF(cx - rad, cy - rad * bh / bw, rad * 2, rad * 2 * bh / bw))
+    pa.end()
+    return pm
 
 
 # ───────────────────────── الأيقونات (SVG outline) ─────────────────────────
@@ -5890,6 +6017,7 @@ ICON_PATHS = dict(
     check="M5 12l5 5L20 7", play="M7 4l13 8l-13 8z", building="M4 21V5l8-3v19M12 9h8v12M7 8h2M7 12h2M7 16h2M15 13h2M15 17h2",
     puzzle="M10 3h4v3a2 2 0 1 0 4 0V3h3v7h-3a2 2 0 1 0 0 4h3v7h-7v-3a2 2 0 1 0-4 0v3H3v-7h3a2 2 0 1 0 0-4H3V3z",
     expand="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", maximize="M4 4h16v16H4zM4 9h16",
+    clock="M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18M12 7v5l3 2",
     arrowl="M19 12H5M11 6l-6 6l6 6", arrowr="M5 12h14M13 6l6 6l-6 6", archive="M3 4h18v4H3zM5 8v12h14V8M10 12h4",
 )
 EMOJI_ICON = {
@@ -5957,7 +6085,7 @@ class _Ev:
 def _fg_color(widget_role):
     p = ThemeState.p()
     return {"primary": p["on_acc"], "danger": p["bad"], "dangerfill": "#FFFFFF", "link": p["link"],
-            "soft": p["acc"] if ThemeState.key == "light" else p["text"]}.get(widget_role, p["text"])
+            "soft": p["acc"] if is_light() else p["text"]}.get(widget_role, p["text"])
 
 
 _ALL_BUTTONS = weakref.WeakSet()
@@ -6011,12 +6139,61 @@ _FIXED_KEY_MAP = {"#EF4444": "bad", "#DC2626": "bad", "#059669": "ok", "#10B981"
 def _theme_color_key(color):
     """اللون اللي الدوال المنقولة بتبعته (t["success"] ...) → مفتاح في PAL، عشان لما الثيم يتغيّر اللون يتغيّر معاه."""
     c = str(color).upper()
-    for th in ("light", "dark"):
+    for th in PAL:
         T = core.THEMES.get(th) or {}
         for k, pk in _THEME_KEY_MAP:
             if str(T.get(k, "")).upper() == c:
                 return pk
     return _FIXED_KEY_MAP.get(c)
+
+
+# ───────────────────────── النص لازم يدخل جوه الزرار ─────────────────────────
+# طلب أحمد (13:45): الكلام في الأزرار كان بيطلع بره الزرار (عربي وإنجليزي). على الويندوز الخط (Segoe UI / Tahoma)
+# ومقاس الشاشة (125% / 150%) بيفرقوا عن هنا، فبدل ما نعتمد على مقاسات ثابتة: كل زرار وكل عنوان بيقيس نصه بنفسه.
+# الأول بياخد المساحة اللي محتاجها، ولو المكان ضيق (نافذة صغيرة / مقاس ثابت) بيصغّر الخط شوية،
+# ولو لسه مش داخل (آخر حل) بيختصر الكلام بـ «…» والكلام كامل بيظهر لما تقف عليه بالماوس.
+FIT_MIN_PT = 6.2
+
+
+def fit_floor(pt):
+    """أصغر خط مسموح: الخط العادي (9 وأكبر) مبينزلش عن ~8.5، والخطوط الصغيرة أصلاً (الشريط الجانبي) بتنزل نقطة بس."""
+    pt = float(pt or 9)
+    if pt >= 9:
+        return min(pt, max(8.25, pt - 1.5))
+    return max(FIT_MIN_PT, pt - 1.0)
+
+
+def fit_line(font, text, avail):
+    """(الخط, النص اللي هيترسم, اختصر؟) — نص في سطر واحد يدخل في avail بكسل."""
+    f = QFont(font)
+    if not text or avail <= 0:
+        return f, text or "", False
+    pt = f.pointSizeF() if f.pointSizeF() > 0 else 9.0
+    floor = fit_floor(pt)
+    fm = QFontMetrics(f)
+    while fm.horizontalAdvance(text) > avail and pt > floor + 1e-6:
+        pt = max(floor, pt - 0.25)
+        f.setPointSizeF(pt)
+        fm = QFontMetrics(f)
+    if fm.horizontalAdvance(text) <= avail:
+        return f, text, False
+    return f, fm.elidedText(text, Qt.ElideRight, int(avail)), True
+
+
+def _wrap_words(fm, text, width):
+    """تقسيم الكلام على سطور (كلمة كلمة) بعرض width."""
+    words = text.split()
+    lines, cur = [], ""
+    for wd in words:
+        t = (cur + " " + wd) if cur else wd
+        if not cur or fm.horizontalAdvance(t) <= width:
+            cur = t
+        else:
+            lines.append(cur)
+            cur = wd
+    if cur:
+        lines.append(cur)
+    return lines or [text]
 
 
 class Label(QWidget, TkCompat):
@@ -6042,6 +6219,12 @@ class Label(QWidget, TkCompat):
             f.setPointSizeF(size)
         f.setBold(bold)
         self.lbl.setFont(f)
+        self._base_pt = f.pointSizeF()
+        self._disp = ""
+        self._fit_state = None
+        if not wrap:
+            # الـ QLabel نفسه ممكن يضيق؛ الـ Label بيبلغ المقاس الكامل للتخطيط (sizeHint) وبيصغّر/يختصر لو اتضيّق
+            self.lbl.setMinimumWidth(1)
         lay.addWidget(self.ic, 0, Qt.AlignVCenter)
         lay.addWidget(self.lbl, 1)
         if align is not None:
@@ -6060,7 +6243,8 @@ class Label(QWidget, TkCompat):
             name, txt = split_icon(raw)
             self._text = raw
             self._icon_name = self._fixed_icon or name
-            self.lbl.setText(txt)
+            self._disp = "" if txt is None else str(txt)
+            self.lbl.setText(self._disp)
         if "text_color" in kw and kw["text_color"]:
             key = _theme_color_key(kw["text_color"])
             if key:   # لون من ألوان الثيم: يفضل ماشي مع الثيم لو اتغيّر
@@ -6075,7 +6259,60 @@ class Label(QWidget, TkCompat):
             f.setPointSizeF(fnt[1] * 0.75 + 1)
             f.setBold("bold" in fnt)
             self.lbl.setFont(f)
+            self._base_pt = f.pointSizeF()
         self._restyle()
+        if "text" in kw or "font" in kw:
+            self.updateGeometry()
+            self._fit()
+
+    def _full_font(self):
+        f = QFont(self.lbl.font())
+        f.setPointSizeF(self._base_pt)
+        return f
+
+    def _fit(self):
+        """لو المكان أضيق من الكلام: نصغّر الخط شوية، وآخر حل «…» + الكلام كامل في التلميح."""
+        if self.lbl.wordWrap():
+            return
+        avail = self.lbl.width() - 1
+        txt = self._disp
+        if avail <= 4:
+            return
+        fnt, shown, el = fit_line(self._full_font(), txt, avail)
+        if self.lbl.font() != fnt:
+            self.lbl.setFont(fnt)
+        if self.lbl.text() != shown:
+            self.lbl.setText(shown)
+        self._fit_state = (fnt, shown, el)
+        if el:
+            self.setToolTip(txt)
+        elif self.toolTip() == txt and txt:
+            self.setToolTip("")
+
+    def _hint(self):
+        f = self._full_font()
+        fm = QFontMetrics(f)
+        w = max([fm.horizontalAdvance(x) for x in (self._disp or "").split("\n")] + [0]) + 2
+        if self._icon_name:
+            w += 14 + self.layout().spacing()
+        lines = (self._disp or "").split("\n")
+        lh = max([fm.height()] + [fm.boundingRect(x).height() for x in lines if x])
+        h = max(lh * len(lines), 14 if self._icon_name else 0)
+        return QSize(w, h)
+
+    def sizeHint(self):
+        if self.lbl.wordWrap():
+            return super().sizeHint()
+        return self._hint()
+
+    def minimumSizeHint(self):
+        if self.lbl.wordWrap():
+            return super().minimumSizeHint()
+        return self._hint()
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
 
     def set_color_key(self, key):
         self._color_key = key
@@ -6098,7 +6335,7 @@ class Label(QWidget, TkCompat):
         return self._text if k == "text" else None
 
     def text(self):
-        return self.lbl.text()
+        return self._disp
 
 
 class Button(QPushButton, TkCompat):
@@ -6109,10 +6346,12 @@ class Button(QPushButton, TkCompat):
         self._fixed_icon = icon
         self._icon_name = None
         self._raw = ""
+        self._fit_state = None
         if role:
             self.setProperty("role", role)
         if big:
             self.setProperty("big", "true")
+            f = self.font(); f.setPointSizeF(10); self.setFont(f)
         self.setCursor(Qt.PointingHandCursor)
         self.setFocusPolicy(Qt.StrongFocus)
         self.clicked.connect(self._fire)
@@ -6125,6 +6364,84 @@ class Button(QPushButton, TkCompat):
     def _fire(self):
         if self._command:
             self._command()
+
+    # ---- المقاس والرسم: النص لازم يفضل جوه الزرار ----
+    _ICON_GAP = 6
+
+    def _pad_w(self):
+        """المسافة اللي الستايل بياخدها (البادينج + الإطار) من عرض الزرار."""
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.rect = QRect(0, 0, 400, 60)
+        cr = self.style().subElementRect(QStyle.SE_PushButtonContents, opt, self)
+        return max(0, 400 - cr.width())
+
+    def _need_w(self):
+        txt = "" if (getattr(self, "_icon_only", False) and not self.icon().isNull()) else self.text()
+        fm = QFontMetrics(self.font())
+        w = fm.horizontalAdvance(txt) if txt else 0
+        if not self.icon().isNull():
+            w += self.iconSize().width() + (self._ICON_GAP if txt else 0)
+        return w + self._pad_w() + 4
+
+    def sizeHint(self):
+        s = super().sizeHint()
+        if getattr(self, "_icon_only", False):
+            return QSize(max(self._need_w(), s.height()), s.height())
+        return QSize(max(s.width(), self._need_w()), s.height())
+
+    def minimumSizeHint(self):
+        s = super().minimumSizeHint()
+        if getattr(self, "_icon_only", False):
+            return QSize(max(self._need_w(), s.height()), s.height())
+        return QSize(max(s.width(), self._need_w()), s.height())
+
+    def _label_color(self):
+        p = ThemeState.p()
+        if not self.isEnabled():
+            return p["muted"]
+        return {"primary": p["on_acc"], "danger": p["bad"], "dangerfill": "#FFFFFF", "link": p["link"],
+                "tiledanger": p["bad"], "tileaccent": p["acc2"]}.get(self._role, p["text"])
+
+    def paintEvent(self, e):
+        # خلفية الزرار من الستايل، والأيقونة والنص بنرسمهم إحنا: مسافة ثابتة بينهم (في العربي كانت الأيقونة
+        # بتلزق في الكلام)، والنص بيصغر/يتختصر لو الزرار أضيق منه بدل ما يطلع بره
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        txt, ic = self.text(), QIcon(self.icon())
+        if getattr(self, "_icon_only", False) and not ic.isNull():
+            txt = ""   # الميني: اللغة والصوت أيقونة بس (الكلام في التلميح) عشان الهيدر الضيق
+        opt.text = ""
+        opt.icon = QIcon()
+        pa = QStylePainter(self)
+        pa.drawControl(QStyle.CE_PushButton, opt)
+        cr = self.style().subElementRect(QStyle.SE_PushButtonContents, opt, self)
+        has_ic = not ic.isNull()
+        isz = self.iconSize() if has_ic else QSize(0, 0)
+        gap = self._ICON_GAP if (has_ic and txt) else 0
+        avail = cr.width() - isz.width() - gap - 2
+        fnt, shown, el = fit_line(self.font(), txt, avail)
+        if self._role == "link" and self.underMouse():
+            fnt.setUnderline(True)
+        fm = QFontMetrics(fnt)
+        tw = fm.horizontalAdvance(shown) if shown else 0
+        block = isz.width() + gap + tw
+        x0 = cr.left() + max(0, (cr.width() - block) // 2)
+        if self.layoutDirection() == Qt.RightToLeft:
+            tx, ix = x0, x0 + tw + gap
+        else:
+            ix, tx = x0, x0 + isz.width() + gap
+        if has_ic:
+            pm = ic.pixmap(isz, self.devicePixelRatioF(), QIcon.Normal if self.isEnabled() else QIcon.Disabled)
+            pa.drawPixmap(ix, cr.top() + (cr.height() - isz.height()) // 2, pm)
+        if shown:
+            pa.setPen(qc(self._label_color()))
+            pa.setFont(fnt)
+            pa.drawText(QRect(tx, cr.top(), tw + 2, cr.height()), Qt.AlignCenter | Qt.TextSingleLine, shown)
+        pa.end()
+        self._fit_state = (fnt, [shown], fm.height(), avail, el)
+        if el and not self.toolTip():
+            self.setToolTip(txt)
 
     def set_role(self, role):
         self._role = role
@@ -6148,6 +6465,7 @@ class Button(QPushButton, TkCompat):
             self._icon_name = self._fixed_icon or name
             self.setText(txt)
             self.refresh_icon()
+            self.updateGeometry()
         if "state" in kw:
             self.setEnabled(kw["state"] != "disabled")
         if "command" in kw:
@@ -6324,14 +6642,14 @@ class Switch(QCheckBox, TkCompat):
         pa.setRenderHint(QPainter.Antialiasing)
         on = self.isChecked()
         pa.setPen(Qt.NoPen)
-        pa.setBrush(QColor(p["fill"] if on else p["track"]))
+        pa.setBrush(qc(p["fill"] if on else p["track"]))
         r = self.rect().adjusted(1, 2, -1, -2)
         pa.drawRoundedRect(r, r.height() / 2, r.height() / 2)
         knob = r.height() - 4
         x = r.right() - knob - 2 if on else r.left() + 2
         if self.layoutDirection() == Qt.RightToLeft:
             x = r.left() + 2 if on else r.right() - knob - 2
-        pa.setBrush(QColor("#FFFFFF" if (ThemeState.key == "light" or not on) else "#0B0F14"))
+        pa.setBrush(QColor("#FFFFFF" if (is_light() or not on) else p["on_acc"]))
         pa.drawEllipse(x, r.top() + 2, knob, knob)
         pa.end()
 
@@ -6381,8 +6699,201 @@ class RoleBadge(QFrame, TkCompat):
     def restyle(self):
         if self._border:
             c = QColor(self._border)
-            soft = f"rgba({c.red()},{c.green()},{c.blue()},{0.10 if ThemeState.key == 'light' else 0.16})"
+            soft = f"rgba({c.red()},{c.green()},{c.blue()},{0.10 if is_light() else 0.16})"
             self.setStyleSheet(f"QFrame#Role {{ border: 1px solid {self._border}; background: {soft}; border-radius: 11px; }}")
+
+
+class StackButton(Button):
+    """زر بأيقونة فوق والنص تحت (الشريط الجانبي وكروت الأوامر). نفس واجهة Button بالظبط
+    (configure/cget/invoke/command)؛ الشكل بس اللي مختلف. stacked=False بيرجّعه زر عادي (لما يتنقل للهيدر)."""
+    def __init__(self, text="", parent=None, command=None, role="rail", icon=None, icon_size=17, stacked=True):
+        self._isz = icon_size
+        self._stacked = stacked
+        self._rail_role = role
+        super().__init__(text, parent, command=command, role=role, icon=icon)
+
+    def set_stacked(self, on, flat_role="pill"):
+        self._stacked = bool(on)
+        self.set_role(self._rail_role if on else flat_role)
+        self.updateGeometry()
+        self.update()
+
+    def _text_color(self):
+        p = ThemeState.p()
+        if not self.isEnabled():
+            return p["muted"]
+        if self._role == "tileaccent":
+            return p["acc2"]
+        return p["bad"] if self._role in ("tiledanger", "danger") else p["text"]
+
+    def refresh_icon(self):
+        name = self._icon_name
+        if not name:
+            self.setIcon(QIcon())
+            return
+        p = ThemeState.p()
+        if self._stacked:
+            col = {"tiledanger": p["bad"], "danger": p["bad"], "tileaccent": p["acc2"]}.get(self._role, p["acc"])
+            self.setIcon(make_icon(name, col, self._isz, p["muted"]))
+        else:
+            self.setIcon(make_icon(name, _fg_color(self._role), 14, p["muted"]))
+
+    def sizeHint(self):
+        if not self._stacked:
+            return super().sizeHint()
+        fm = QFontMetrics(self.font())
+        return QSize(max(56, min(fm.horizontalAdvance(self.text()) + 12, 120)), self._isz + 8 + fm.height() * 2)
+
+    def minimumSizeHint(self):
+        return QSize(20, 20) if self._stacked else super().minimumSizeHint()
+
+    def _stack_layout(self, r):
+        """(الخط, السطور, حجم الأيقونة, المسافة, ارتفاع الكتلة, اختصر؟) — النص يدخل في الزرار سطر أو سطرين."""
+        fnt = QFont(self.font())
+        txt = self.text()
+        tw = r.width() - 6
+        floor = fit_floor(fnt.pointSizeF())
+        while True:
+            fm = QFontMetrics(fnt)
+            lines = [txt] if fm.horizontalAdvance(txt) <= tw else _wrap_words(fm, txt, tw)
+            isz = self._isz if len(lines) == 1 else max(12, self._isz - 3)
+            gap = 3 if len(lines) == 1 else 1
+            block = isz + gap + fm.height() * len(lines)
+            wide = max(fm.horizontalAdvance(x) for x in lines)
+            if len(lines) <= 2 and wide <= tw and block <= r.height() - 4:
+                return fnt, lines, isz, gap, block, False
+            if fnt.pointSizeF() <= floor + 1e-6:
+                break
+            fnt.setPointSizeF(max(floor, fnt.pointSizeF() - 0.25))
+        # آخر حل: سطرين بالكتير وكل سطر بيتختصر بـ «…»
+        if len(lines) > 2:
+            lines = [lines[0], " ".join(lines[1:])]
+        if len(lines) == 2 and isz + 1 + fm.height() * 2 > r.height() - 2:
+            lines = [txt]
+            isz, gap = self._isz, 3
+        cut = [fm.elidedText(x, Qt.ElideRight, tw) for x in lines]
+        block = isz + gap + fm.height() * len(cut)
+        return fnt, cut, isz, gap, block, cut != lines
+
+    def paintEvent(self, e):
+        if not self._stacked:
+            return super().paintEvent(e)
+        opt = QStyleOptionButton()
+        self.initStyleOption(opt)
+        opt.text = ""
+        opt.icon = QIcon()
+        pa = QStylePainter(self)
+        pa.drawControl(QStyle.CE_PushButton, opt)
+        r = self.rect()
+        fnt, lines, isz, gap, block, el = self._stack_layout(r)
+        fm = QFontMetrics(fnt)
+        y = r.top() + max(2, (r.height() - block) // 2)
+        ic = self.icon()
+        if not ic.isNull():
+            pm = ic.pixmap(QSize(isz, isz), self.devicePixelRatioF(), QIcon.Normal if self.isEnabled() else QIcon.Disabled)
+            pa.drawPixmap(r.left() + (r.width() - isz) // 2, y, pm)
+        pa.setPen(qc(self._text_color()))
+        pa.setFont(fnt)
+        ty = y + isz + gap
+        for ln in lines:
+            pa.drawText(QRect(r.left() + 3, ty, r.width() - 6, fm.height()), Qt.AlignHCenter | Qt.AlignTop | Qt.TextSingleLine, ln)
+            ty += fm.height()
+        pa.end()
+        self._fit_state = (fnt, lines, block, r.width() - 6, el)
+        if el and not self.toolTip():
+            self.setToolTip(self.text())
+
+
+class Ring(QWidget, TkCompat):
+    """«تمت المعالجة» كدايرة: نفس واجهة شريط التقدم (set / get / configure) — الدوال المنقولة بتناديها زي ما هي."""
+    def __init__(self, parent=None, size=80):
+        super().__init__(parent)
+        self._v = 0.0
+        self.setFixedSize(size, size)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+
+    def set(self, v):
+        try:
+            self._v = max(0.0, min(1.0, float(v)))
+        except Exception:
+            self._v = 0.0
+        self.update()
+
+    def get(self):
+        return self._v
+
+    def value(self):
+        return int(self._v * 1000)
+
+    def configure(self, **kw):
+        pass
+
+    def paintEvent(self, e):
+        p = ThemeState.p()
+        pa = QPainter(self)
+        pa.setRenderHint(QPainter.Antialiasing)
+        w = 6.0
+        r = QRectF(w / 2 + 1, w / 2 + 1, self.width() - w - 2, self.height() - w - 2)
+        pa.setPen(Qt.NoPen)
+        inner = QColor(255, 255, 255, 150) if is_light() else QColor(0, 0, 0, 60)
+        pa.setBrush(inner)
+        pa.drawEllipse(r.adjusted(w / 2, w / 2, -w / 2, -w / 2))
+        pen = QPen(qc(p["track"]), w)
+        pen.setCapStyle(Qt.RoundCap)
+        pa.setPen(pen)
+        pa.setBrush(Qt.NoBrush)
+        pa.drawEllipse(r)
+        if self._v > 0:
+            pen.setColor(QColor(p["acc"]))
+            pa.setPen(pen)
+            pa.drawArc(r, 90 * 16, -int(self._v * 360 * 16))
+        pa.end()
+
+
+class FitLabel(Label):
+    """Label للرقم الكبير: بيصغّر الخط لوحده لو الرقم طويل عشان ميتقطعش."""
+    def __init__(self, text="", parent=None, size=26, min_size=14, **kw):
+        self._max_pt = size
+        self._min_pt = min_size
+        super().__init__(text, parent, size=size, **kw)
+
+    def configure(self, **kw):
+        super().configure(**kw)
+        if "text" in kw:
+            self._fit()
+
+    def _fit(self):
+        if not self.isVisible():
+            return
+        avail = self.width() - (20 if self.ic.isVisible() else 0)
+        if avail <= 10:
+            return
+        f = self.lbl.font()
+        pt = self._max_pt
+        while pt > self._min_pt:
+            f.setPointSizeF(pt)
+            if QFontMetrics(f).horizontalAdvance(self.lbl.text()) <= avail - 4:
+                break
+            pt -= 1
+        # والارتفاع كمان: الحروف (والنقط اللي تحت) لازم تدخل في ارتفاع الخانة
+        hh = self.lbl.height() - 2
+        txt = self.lbl.text()
+        while pt > self._min_pt and hh > 8 and txt:
+            f.setPointSizeF(pt)
+            fm = QFontMetrics(f)
+            if fm.tightBoundingRect(txt).height() <= hh and fm.horizontalAdvance(txt) <= avail - 4:
+                break
+            pt -= 1
+        f.setPointSizeF(pt)
+        self.lbl.setFont(f)
+
+    def minimumSizeHint(self):
+        return QSize(40, super().minimumSizeHint().height())
+
+    def resizeEvent(self, e):
+        super().resizeEvent(e)
+        self._fit()
 
 
 # ───────────────────────── messagebox / filedialog / simpledialog ─────────────────────────
@@ -6588,10 +7099,36 @@ class Window(QWidget, TkCompat):
     def deiconify(self):
         self.showNormal()
 
+    def showEvent(self, e):
+        super().showEvent(e)
+        if self._resizable and not getattr(self, "_min_checked", False):
+            self._min_checked = True
+            lay = self.layout()
+            # لوحات بعرض أدنى ثابت (زي 520): لو الأزرار اللي جواها محتاجة أكتر، العرض الأدنى يكبر
+            for ch in self.findChildren(QWidget):
+                cl = ch.layout()
+                if cl is not None and ch.minimumWidth() > 0 and cl.minimumSize().width() > ch.minimumWidth():
+                    ch.setMinimumWidth(cl.minimumSize().width())
+            if lay is not None:
+                lay.activate()
+                m = lay.minimumSize()
+                sg = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
+                mw, mh = min(m.width(), sg.width() - 16), min(m.height(), sg.height() - 34)
+                self.setMinimumSize(max(self.minimumWidth(), mw), max(self.minimumHeight(), mh))
+                if self.width() < mw or self.height() < mh:
+                    self.resize(max(self.width(), mw), max(self.height(), mh))
+
     def show_centered(self, parent=None, w=None, h=None, focus=None):
         self.adjustSize()
         if w:
-            self.resize(w, max(h or 0, self.sizeHint().height()))
+            # المقاس المطلوب، بس مش أصغر من اللي الكلام محتاجه (خط الويندوز أو تكبير الشاشة ممكن يكبّره)
+            ms = self.minimumSizeHint()
+            sg = QGuiApplication.primaryScreen().availableGeometry()
+            ww = min(max(w, ms.width()), sg.width() - 16)
+            hh = max(h or 0, self.sizeHint().height(), ms.height())
+            if self.layout() is not None and self.layout().hasHeightForWidth():
+                hh = max(hh, self.layout().totalHeightForWidth(ww))
+            self.resize(ww, min(hh, sg.height() - 34))
         if not self._resizable:
             self.setFixedSize(self.size())
         par = parent if isinstance(parent, QWidget) and parent.isVisible() else None
@@ -6889,7 +7426,7 @@ from collections import Counter
 
 
 from PySide6.QtCore import (Qt, QTimer, QSize, QEvent, QObject, QAbstractListModel, QModelIndex, QRect,
-                            QRegularExpression, QPoint)
+                            QRegularExpression, QPoint, QRectF, QPointF)
 from PySide6.QtGui import (QIcon, QFont, QColor, QPainter, QPen, QKeySequence, QShortcut, QAction, QGuiApplication,
                            QRegularExpressionValidator, QFontMetrics, QPixmap)
 from PySide6.QtWidgets import (QApplication, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout, QGridLayout,
@@ -6901,6 +7438,7 @@ APP_TITLE = f"A2R POS Console - {APP_OWNER}"     # اسم النافذة (برض
 APP_NAME = "A2R POS Console"
 FOOT_TEXT = f"A2R {APP_VERSION} • {APP_OWNER} • Alexandria"
 FULL_W, FULL_H = 800, 500
+RAIL_BTN_H = 46      # كان 40: سطرين في الشريط الجانبي كانوا بيتزنقوا
 MINI_W, MINI_H = 440, 232
 
 
@@ -7063,25 +7601,33 @@ class OpsDelegate(QStyledItemDelegate):
         pa.save()
         pa.setRenderHint(QPainter.Antialiasing)
         selected = bool(option.state & QStyle.State_Selected)
-        if selected:
-            pa.fillRect(rect, QColor(p["sel"]))
-        elif option.state & QStyle.State_MouseOver:
-            pa.fillRect(rect, QColor(p["hover"]))
-        # نفس معنى ألوان الكونسول (سجل العمليات): 🟥 مكرر  🟨 ناقص  🟧 وحدة أخرى  🟪 ملغي
-        dark = ThemeState.key == "dark"
-        col = {"ok": p["ok"], "manual": p["man"], "dup": p["bad"],
-               "void": "#C084FC" if dark else "#9333EA",
-               "wrong": "#FB923C" if dark else "#EA580C",
-               "missing": "#FACC15" if dark else "#CA8A04"}.get(r["kind"], p["muted"])
+        if selected or option.state & QStyle.State_MouseOver:
+            pa.setPen(Qt.NoPen)
+            pa.setBrush(qc(p["sel"] if selected else p["hover"]))
+            pa.drawRoundedRect(QRectF(rect.adjusted(1, 1, -1, -1)), 8, 8)
+        # نفس معنى ألوان الكونسول (سجل العمليات): 🟥 مكرر  🟨 ناقص  🟧 وحدة أخرى  🟪 ملغي — بألوان أهدى
+        col = QColor({"ok": p["ok"], "manual": p["man"], "dup": p["bad"], "void": p["void"],
+                      "wrong": p["wrong"], "missing": p["missing"]}.get(r["kind"], p["muted"]))
         rtl = option.direction == Qt.RightToLeft
-        stripe_x = rect.right() - 4 if rtl else rect.left() + 1
+        # خط زمني: خط رفيع + نقطة ملونة
+        cx = rect.right() - 9 if rtl else rect.left() + 9
+        cy = rect.top() + 14
+        line = qc(p["line"] if not is_light() else p["border"])
+        pa.setPen(QPen(line, 1.4))
+        if index.row() > 0:
+            pa.drawLine(QPointF(cx, rect.top()), QPointF(cx, cy - 5))
+        if index.row() < index.model().rowCount() - 1:
+            pa.drawLine(QPointF(cx, cy + 5), QPointF(cx, rect.bottom() + 1))
+        halo = QColor(col); halo.setAlphaF(0.22)
         pa.setPen(Qt.NoPen)
-        pa.setBrush(QColor(col))
-        pa.drawRoundedRect(QRect(stripe_x, rect.top() + 6, 3, rect.height() - 12), 1.5, 1.5)
-        inner = rect.adjusted(12, 4, -12, -4) if True else rect
+        pa.setBrush(halo)
+        pa.drawEllipse(QPointF(cx, cy), 6.5, 6.5)
+        pa.setBrush(col)
+        pa.drawEllipse(QPointF(cx, cy), 3.6, 3.6)
+        inner = rect.adjusted(6, 3, -22, -3) if rtl else rect.adjusted(22, 3, -6, -3)
         f_b = QFont(option.font); f_b.setBold(True); f_b.setPointSizeF(8.6)
-        f_s = QFont(option.font); f_s.setBold(False); f_s.setPointSizeF(7.6)
-        text_col = QColor(p["sel_text"] if selected else p["text"])
+        f_s = QFont(option.font); f_s.setBold(False); f_s.setPointSizeF(7.4)
+        text_col = qc(p["sel_text"] if selected else p["text"])
         muted = QColor(p["muted"])
         top = QRect(inner.left(), inner.top(), inner.width(), inner.height() // 2)
         bot = QRect(inner.left(), inner.top() + inner.height() // 2, inner.width(), inner.height() // 2)
@@ -7106,14 +7652,14 @@ class OpsDelegate(QStyledItemDelegate):
         if r["kind"] == "void":
             fv = QFont(f_b); fv.setStrikeOut(True); pa.setFont(fv)
             c2 = QColor(text_col); c2.setAlphaF(0.6); pa.setPen(c2)
+        elif r["kind"] != "ok":
+            pa.setPen(col)
         pa.drawText(amt_top, trail | Qt.AlignVCenter, r["amount"])
         pa.setFont(f_s)
         pa.setPen(muted)
         sub = f"{r['name']} · {r['status']}"
         pa.drawText(txt_bot, lead | Qt.AlignVCenter, QFontMetrics(f_s).elidedText(sub, Qt.ElideRight, txt_bot.width()))
         pa.drawText(amt_bot, trail | Qt.AlignVCenter, r["time"])
-        pa.setPen(QPen(QColor(p["border"]), 1))
-        pa.drawLine(rect.left() + 4, rect.bottom(), rect.right() - 4, rect.bottom())
         pa.restore()
 
 
@@ -7439,10 +7985,35 @@ class MainWindow(QWidget, core.ConsoleLogic):
     # ---------- الميني / الكاملة ----------
     def _place(self, w, h):
         scr = (self.screen() or QGuiApplication.primaryScreen()).availableGeometry()
-        w = min(w, scr.width() - 40)
-        h = min(h, scr.height() - 40)
+        # شاشة صغيرة مع تكبير 150%: نضغط المسافات شوية بدل ما الحاجات تركب على بعض
+        self._set_density(compact=(scr.height() - 34 < h and not self.is_mini_mode))
+        self.setMinimumSize(0, 0)
+        self.setMaximumSize(16777215, 16777215)
+        lay = self.layout()
+        lay.activate()
+        ms = lay.minimumSize()
+        # 800×500 زي ما هي، وتكبر بس لو الكلام محتاج (خط الويندوز / تكبير الشاشة)؛ 34 = شريط العنوان
+        w = min(max(w, ms.width()), scr.width() - 16)
+        h = min(max(h, ms.height()), scr.height() - 34)
         self.setFixedSize(w, h)
         self.move(scr.left() + (scr.width() - w) // 2, scr.top() + (scr.height() - h) // 2)
+
+    def _set_density(self, compact):
+        if getattr(self, "_compact", None) == compact:
+            return
+        self._compact = compact
+        self.card_dash.setFixedHeight(112 if compact else 128)
+        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_archive_downloads, self.btn_reset):
+            b.setFixedHeight(48 if compact else 52)
+        # الشريط الجانبي: في الشاشة الصغيرة بيبقى أعرض شوية عشان كل اسم يدخل في سطر واحد (الزرار أقصر)
+        self.rail.setFixedWidth(108 if compact else 92)
+        self._rail_l.setContentsMargins(5, 6 if compact else 8, 5, 6 if compact else 8)
+        for b in (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip):
+            b.setFixedHeight(40 if compact else RAIL_BTN_H)
+        if not self.is_mini_mode:
+            for b in (self.btn_lang, self.btn_mute):
+                b.setFixedHeight(36 if compact else 40)
+        self._main_col.setSpacing(6 if compact else 8)
 
     def switch_to_mini_view(self, show=True):
         self.is_mini_mode = True
@@ -7450,6 +8021,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.b_bar.hide()
         self.btn_back_to_mini.hide()
         self.f_role_btn.hide()
+        self._dock_chrome(full=False)
         self.body_mini.show()
         self._refresh_mini_archive_label()
         self._place(MINI_W, MINI_H)
@@ -7464,6 +8036,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.body_mini.hide()
         self.btn_back_to_mini.show()
         self.f_role_btn.show()
+        self._dock_chrome(full=True)
         self.b_bar.show()
         self.body_full.show()
         self._place(FULL_W, FULL_H)
@@ -7480,48 +8053,119 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self._schedule_auto_minimize(30000)
 
     # ---------- بناء الشاشة ----------
+    # الشكل الزجاجي (round3): شريط جانبي (العرض / التقارير / الطباعة + اللغة والصوت)، إجمالي كبير مع دايرة
+    # «تمت المعالجة»، زر التشغيل بعرض الشاشة، مطابقة الخزينة، 5 كروت أوامر، كارت المسار/التاريخ/المفاتيح،
+    # و«آخر العمليات» كخط زمني. نفس الأزرار والنصوص والأوامر — الشكل بس اللي اتغير.
     def setup_ui(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        self._bg_cache = None
+        root = QHBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
 
-        # ===== الهيدر =====
-        self.header = QFrame()
-        self.header.setObjectName("Header")
-        self.header.setFixedHeight(40)
-        hl = QHBoxLayout(self.header)
-        hl.setContentsMargins(10, 0, 10, 0)
-        hl.setSpacing(6)
+        # ===== الشريط الجانبي =====
+        self.rail = QFrame()
+        self.rail.setObjectName("Rail")
+        self.rail.setFixedWidth(92)
+        self._rail_l = QVBoxLayout(self.rail)
+        self._rail_l.setContentsMargins(5, 8, 5, 8)
+        self._rail_l.setSpacing(1)
         self.lbl_logo = QLabel()
         self.lbl_logo.setTextFormat(Qt.RichText)
-        hl.addWidget(self.lbl_logo)
-        self.cb_theme = Combo(readonly=True, command=self._theme_picked)
-        self.cb_theme.setFixedWidth(84)
-        self.cb_theme.setMinimumHeight(26)
-        hl.addWidget(self.cb_theme)
-        self.btn_lang = Button("🌐 عربي", command=self.toggle_language, role="pill")
-        hl.addWidget(self.btn_lang)
-        self.btn_mute = Button(("🔇 Muted" if core.SOUND_MUTED else "🔊 Sound"), command=self.toggle_mute, role="pill")
-        hl.addWidget(self.btn_mute)
-        hl.addStretch(1)
-        self.lbl_clock = Label("", size=9.5, color_key="acc")
-        hl.addWidget(self.lbl_clock)
+        self.lbl_logo.setAlignment(Qt.AlignCenter)
+        self.lbl_logo.setToolTip(FOOT_TEXT)
+        self._rail_l.addWidget(self.lbl_logo)
+        self._rail_l.addSpacing(2)
+        # b_bar = مجموعات الأزرار (بتستخبى في الميني زي الشريط السفلي القديم)
+        self.b_bar = QWidget()
+        bl = QVBoxLayout(self.b_bar)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(1)
+        self._bar_captions = []  # (label, ar, en)
+
+        def _mk_group(cap_ar, cap_en, buttons):
+            cap = Label(T2(cap_ar, cap_en), size=6.8, bold=False, color_key="muted", align=Qt.AlignCenter)
+            self._bar_captions.append((cap, cap_ar, cap_en))
+            bl.addSpacing(4)
+            bl.addWidget(cap)
+            for b in buttons:
+                b.setFixedHeight(RAIL_BTN_H)
+                b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+                bl.addWidget(b)
+
+        self.btn_view_rec = StackButton("", command=self.open_records_viewer)
+        self.btn_arch_full = StackButton("", command=self.open_archive_history)
+        self.btn_chrome = StackButton("", command=self.open_chrome_browser)
+        self.btn_pdf_export = StackButton("", command=self.export_pdf_summary, role="tileaccent")
+        self.btn_excel = StackButton("", command=self.open_excel)
+        self.btn_print_slip = StackButton("", command=self.print_slip)
+        for b in (self.btn_view_rec, self.btn_arch_full, self.btn_chrome, self.btn_excel, self.btn_print_slip):
+            f = b.font(); f.setPointSizeF(7.2); b.setFont(f)
+        _mk_group("العرض", "View", [self.btn_view_rec, self.btn_arch_full, self.btn_chrome])
+        _mk_group("التقارير", "Reports", [self.btn_excel])
+        self._cap_reports = self._bar_captions[-1][0]   # بيستخبى لو الإكسيل مستخبي (مش مشرف)
+        _mk_group("الطباعة", "Print", [self.btn_print_slip])
+        # النسخة دي: زر سجل الأرشيف والإكسيل للمشرف، وبوابة المرور بعد الدخول (unlock_full_console)
+        self.btn_arch_full.hide()
+        self.btn_excel.hide()
+        self.btn_chrome.hide()
+        self._rail_l.addWidget(self.b_bar)
+        self._rail_l.addStretch(1)
+        self._rail_sep = _sep(False)
+        self._rail_l.addWidget(self._rail_sep)
+        self._rail_tail = QVBoxLayout()
+        self._rail_tail.setSpacing(1)
+        self._rail_l.addLayout(self._rail_tail)
+        self.btn_lang = StackButton("🌐 عربي", command=self.toggle_language, icon_size=14)
+        self.btn_mute = StackButton(("🔇 Muted" if core.SOUND_MUTED else "🔊 Sound"), command=self.toggle_mute, icon_size=14)
+        for b in (self.btn_lang, self.btn_mute):
+            f = b.font(); f.setPointSizeF(7.4); b.setFont(f)
+        root.addWidget(self.rail)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(8)
+        root.addLayout(right, 1)
+
+        # ===== الهيدر (زجاج) =====
+        self.header = QFrame()
+        self.header.setObjectName("GlassBar")
+        self.header.setFixedHeight(38)
+        self._hl = hl = QHBoxLayout(self.header)
+        hl.setContentsMargins(8, 0, 8, 0)
+        hl.setSpacing(6)
         self.f_role_btn = RoleBadge()
         rl = QHBoxLayout(self.f_role_btn)
-        rl.setContentsMargins(8, 1, 8, 1)
+        rl.setContentsMargins(9, 1, 9, 1)
         self.badge_role = Label("● USER", size=7.5)
         rl.addWidget(self.badge_role)
-        self.f_role_btn.setFixedHeight(22)
+        self.f_role_btn.setFixedHeight(24)
         hl.addWidget(self.f_role_btn)
-        self.btn_back_to_mini = Button(tr("btn_back_mini"), command=self.switch_to_mini_view, role="soft", icon="mini")
+        self.clock_pill = QFrame()
+        self.clock_pill.setObjectName("Pill")
+        cpl = QHBoxLayout(self.clock_pill)
+        cpl.setContentsMargins(9, 1, 9, 1)
+        self.lbl_clock = Label("", size=9.2, icon="clock")
+        self.lbl_clock.lbl.setLayoutDirection(Qt.LeftToRight)
+        cpl.addWidget(self.lbl_clock)
+        self.clock_pill.setFixedHeight(24)
+        hl.addWidget(self.clock_pill)
+        self._hdr_stretch_at = hl.count()
+        hl.addStretch(1)
+        self.cb_theme = Combo(readonly=True, command=self._theme_picked)
+        self.cb_theme.setFixedWidth(96)
+        self.cb_theme.setMinimumHeight(24)
+        hl.addWidget(self.cb_theme)
+        self.btn_mode = Button("", command=self._toggle_mode, role="pill")
+        hl.addWidget(self.btn_mode)
+        self.btn_back_to_mini = Button(tr("btn_back_mini"), command=self.switch_to_mini_view, role="pill", icon="mini")
         hl.addWidget(self.btn_back_to_mini)
-        root.addWidget(self.header)
+        right.addWidget(self.header)
         self.update_live_clock()
 
         # ===== الميني =====
         self.body_mini = QWidget()
         ml = QVBoxLayout(self.body_mini)
-        ml.setContentsMargins(12, 8, 12, 0)
+        ml.setContentsMargins(2, 0, 2, 0)
         ml.setSpacing(7)
         self.card_mini_status = Card()
         cl = QVBoxLayout(self.card_mini_status)
@@ -7549,35 +8193,111 @@ class MainWindow(QWidget, core.ConsoleLogic):
         ml.addStretch(1)
         self.lbl_mini_foot = Label(FOOT_TEXT, size=7.2, color_key="muted", align=Qt.AlignCenter)
         ml.addWidget(self.lbl_mini_foot, 0, Qt.AlignHCenter)
-        ml.addSpacing(4)
-        root.addWidget(self.body_mini, 1)
+        right.addWidget(self.body_mini, 1)
 
         # ===== الكاملة =====
         self.body_full = QWidget()
-        grid = QGridLayout(self.body_full)
-        grid.setContentsMargins(10, 8, 10, 0)
-        grid.setHorizontalSpacing(7)
-        grid.setVerticalSpacing(7)
-        main_col = QVBoxLayout()
-        main_col.setSpacing(7)
+        bf = QHBoxLayout(self.body_full)
+        bf.setContentsMargins(0, 0, 0, 0)
+        bf.setSpacing(8)
+        main_w = QWidget()
+        main_col = self._main_col = QVBoxLayout(main_w)
+        main_col.setContentsMargins(0, 0, 0, 0)
+        main_col.setSpacing(8)
+
+        # الإجمالي الكبير + العدد + دايرة «تمت المعالجة»
+        self.card_dash = Card(name="Hero")
+        self.pill_c2 = self.pill_c1 = self.card_dash
+        dl = QHBoxLayout(self.card_dash)
+        dl.setContentsMargins(16, 8, 12, 8)
+        dl.setSpacing(12)
+        txt_col = QVBoxLayout()
+        txt_col.setSpacing(0)
+        self.lbl_kpi2_title = Label("", size=8.6, color_key="hero_muted")
+        self.lbl_sum = FitLabel("0.00 EGP", size=27, min_size=15, color_key="hero_text")
+        self.lbl_kpi1_title = Label("", size=8.6, color_key="muted")
+        self.lbl_cnt = Label("0", size=15, color_key="acc")
+        txt_col.addWidget(self.lbl_kpi2_title)
+        txt_col.addWidget(self.lbl_sum)
+        txt_col.addLayout(hbox(self.lbl_kpi1_title, self.lbl_cnt, None, spacing=7))
+        self.lbl_current_file = Label("", size=7.2, bold=False, color_key="muted")
+        self.lbl_current_file.lbl.setLayoutDirection(Qt.LeftToRight)
+        txt_col.addWidget(self.lbl_current_file)
+        dl.addLayout(txt_col, 1)
+        self.progress_bar = Ring(size=82)
+        self.progress_bar.set(0)
+        self.lbl_progress_pct = Label("0%", size=11.5, align=Qt.AlignCenter)
+        self.lbl_ring_sub = Label("", size=6.6, bold=False, color_key="muted", align=Qt.AlignCenter)
+        rlay = self.progress_bar.layout()
+        rlay.addStretch(1)
+        rlay.addWidget(self.lbl_progress_pct, 0, Qt.AlignHCenter)
+        rlay.addWidget(self.lbl_ring_sub, 0, Qt.AlignHCenter)
+        rlay.addStretch(1)
+        dl.addWidget(self.progress_bar, 0, Qt.AlignVCenter)
+        self.card_dash.setFixedHeight(128)   # كان 118: النقط اللي تحت «جنيه» كانت بتتقص
+        main_col.addWidget(self.card_dash)
+
+        # زر التشغيل بعرض الشاشة
+        self.btn_run = Button("", command=self.start_thread, role="primary", big=True)
+        self.btn_run.setFixedHeight(38)
+        f = self.btn_run.font(); f.setPointSizeF(10.5); self.btn_run.setFont(f)
+        main_col.addWidget(self.btn_run)
+        self.card_actions = self.btn_run
+
+        # مطابقة الخزينة
+        pos_card = Card()
+        h3 = QHBoxLayout(pos_card)
+        h3.setContentsMargins(12, 5, 8, 5)
+        h3.setSpacing(7)
+        self.lbl_pos_title = Label("", size=8.6)
+        self.e_pos = Entry(placeholder="POS / Cash Total", justify="center")
+        self.e_pos.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[\d,]*\.?\d*$"), self.e_pos))
+        self.e_pos.setLayoutDirection(Qt.LeftToRight)
+        self.e_pos.bind("<Return>", lambda e: self.check_pos())
+        self.btn_pos_check = Button("", command=self.check_pos, role="primary")
+        self.lbl_diff = Label("", size=8.2)
+        h3.addWidget(self.lbl_pos_title)
+        h3.addWidget(self.e_pos, 1)
+        h3.addWidget(self.btn_pos_check)
+        h3.addWidget(self.lbl_diff)
+        pos_card.setFixedHeight(42)
+        main_col.addWidget(pos_card)
+
+        # 5 كروت أوامر
+        self.btn_manual = StackButton("", command=self.open_manual, role="tile")
+        # طلب أحمد (12:53): زرار واحد بس للملخص = زرار ملخص الـ PDF. زرار «ملخص الفحص» القديم (شاشة الملخص)
+        # اتشال من الشاشة؛ الكائن موجود ومستخبي عشان الدوال المنقولة بتغيّر نصه
+        self.btn_summary_reopen = StackButton("", command=self.reopen_summary_modal, role="tile")
+        self.btn_summary_reopen.hide()
+        self.btn_cash = StackButton("", command=self.open_cash_counter, role="tile")
+        self.btn_archive_downloads = StackButton("", command=self.open_downloads_archiver_dialog, role="tile")
+        self.btn_reset = StackButton("", command=self.confirm_and_reset, role="tiledanger", icon="reset")
+        ag = QHBoxLayout()
+        ag.setSpacing(6)
+        for b in (self.btn_manual, self.btn_pdf_export, self.btn_cash, self.btn_archive_downloads, self.btn_reset):
+            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            b.setFixedHeight(52)
+            f = b.font(); f.setPointSizeF(8.4); b.setFont(f)
+            # «ملخص الفحص» ياخد ضعف العرض عشان اسمه الإنجليزي يدخل في سطر واحد
+            ag.addWidget(b, 2 if b is self.btn_pdf_export else 1)
+        main_col.addLayout(ag)
 
         # بطاقة المسار والتاريخ والمفاتيح
         self.card_top = Card()
-        tl = QHBoxLayout(self.card_top)
-        tl.setContentsMargins(10, 8, 10, 8)
-        tl.setSpacing(10)
-        left = QVBoxLayout()
-        left.setSpacing(6)
-        self.lbl_folder = Label("", size=8, color_key="muted")
+        tl = QVBoxLayout(self.card_top)
+        tl.setContentsMargins(12, 8, 12, 8)
+        tl.setSpacing(6)
+        self.lbl_folder = Label("", size=8, color_key="muted", icon="folder")
         self.lbl_folder.setFixedWidth(116)
         self.e_path = Entry()
         self.e_path.setLayoutDirection(Qt.LeftToRight)
-        self.e_path.setAlignment(Qt.AlignRight | Qt.AlignVCenter) if False else None
         self.e_path.bind("<FocusOut>", lambda e: self.validate_path_live())
         self.btn_browse = Button("", command=self.browse_folder, role="primary", icon="folder")
         self.btn_open_f = Button("", command=self.open_current_folder)
-        left.addLayout(hbox(self.lbl_folder, self.e_path, self.btn_browse, self.btn_open_f, stretch_at=1))
-        self.lbl_d = Label("", size=8, color_key="muted")
+        tl.addStretch(1)
+        tl.addLayout(hbox(self.lbl_folder, self.e_path, self.btn_browse, self.btn_open_f, stretch_at=1))
+        tl.addStretch(1)
+        self.lbl_d = Label("", size=8, color_key="muted", icon="cal")
         self.lbl_d.setFixedWidth(116)
         today = datetime.date.today()
         self.cb_d = Combo(values=[f"{d:02d}" for d in range(1, 32)], center=True)
@@ -7586,177 +8306,110 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.cb_m.set(f"{today.month:02d}")
         self.cb_y = Combo(values=[str(y) for y in range(today.year - 3, today.year + 3)], center=True)
         self.cb_y.set(str(today.year))
-        for c, w in ((self.cb_d, 50), (self.cb_m, 50), (self.cb_y, 62)):
+        for c, w in ((self.cb_d, 46), (self.cb_m, 46), (self.cb_y, 58)):
             c.setFixedWidth(w)
             c.setLayoutDirection(Qt.LeftToRight)
         self.btn_today = Button("", command=self.set_today, role="soft")
         self.btn_yesterday = Button("", command=self.set_yesterday)
-        left.addLayout(hbox(self.lbl_d, self.cb_d, self.cb_m, self.cb_y, self.btn_today, self.btn_yesterday, None))
-        tl.addLayout(left, 1)
-        tl.addWidget(_sep())
-        sw_col = QVBoxLayout()
-        sw_col.setSpacing(9)
+        tl.addLayout(hbox(self.lbl_d, self.cb_d, self.cb_m, self.cb_y, self.btn_today, self.btn_yesterday, None))
         self.sw_autosync = Switch(command=self.toggle_autosync)
         self.lbl_sw_sync = Label("", size=8)
         self.sw_autoprint = Switch(command=self.toggle_autoprint)
         self.lbl_sw_print = Label("", size=8)
-        sw_col.addStretch(1)
-        sw_col.addLayout(hbox(self.sw_autosync, self.lbl_sw_sync, None))
-        sw_col.addLayout(hbox(self.sw_autoprint, self.lbl_sw_print, None))
-        sw_col.addStretch(1)
-        tl.addLayout(sw_col)
+        tl.addStretch(1)
+        tl.addLayout(hbox(self.sw_autosync, self.lbl_sw_sync, 18, self.sw_autoprint, self.lbl_sw_print, None))
+        tl.addStretch(1)
         if self.auto_sync_enabled: self.sw_autosync.select()
         else: self.sw_autosync.deselect()
         if self.auto_print_enabled: self.sw_autoprint.select()
         else: self.sw_autoprint.deselect()
-        main_col.addWidget(self.card_top)
+        main_col.addWidget(self.card_top, 1)
 
-        # الكروت: الإجمالي / العدد / مطابقة الخزينة
-        self.card_dash = QWidget()
-        dl = QHBoxLayout(self.card_dash)
-        dl.setContentsMargins(0, 0, 0, 0)
-        dl.setSpacing(7)
-        self.pill_c2 = Card(name="Hero")
-        h2 = QVBoxLayout(self.pill_c2)
-        h2.setContentsMargins(12, 8, 12, 8)
-        h2.setSpacing(1)
-        self.lbl_kpi2_title = Label("", size=8, color_key="hero_muted")
-        self.lbl_sum = Label("0.00 EGP", size=17, color_key="hero_text")
-        h2.addWidget(self.lbl_kpi2_title)
-        h2.addWidget(self.lbl_sum)
-        h2.addStretch(1)
-        self.pill_c1 = Card()
-        h1 = QVBoxLayout(self.pill_c1)
-        h1.setContentsMargins(12, 8, 12, 8)
-        h1.setSpacing(1)
-        self.lbl_kpi1_title = Label("", size=8, color_key="muted")
-        self.lbl_cnt = Label("0", size=17)
-        h1.addWidget(self.lbl_kpi1_title)
-        h1.addWidget(self.lbl_cnt)
-        h1.addStretch(1)
-        pos_card = Card()
-        h3 = QVBoxLayout(pos_card)
-        h3.setContentsMargins(10, 7, 10, 7)
-        h3.setSpacing(4)
-        self.lbl_pos_title = Label("", size=8, color_key="muted")
-        self.e_pos = Entry(placeholder="POS / Cash Total", justify="center")
-        self.e_pos.setValidator(QRegularExpressionValidator(QRegularExpression(r"^[\d,]*\.?\d*$"), self.e_pos))
-        self.e_pos.setLayoutDirection(Qt.LeftToRight)
-        self.e_pos.bind("<Return>", lambda e: self.check_pos())
-        self.btn_pos_check = Button("", command=self.check_pos, role="primary")
-        self.lbl_diff = Label("", size=8.5)
-        h3.addWidget(self.lbl_pos_title)
-        h3.addLayout(hbox(self.e_pos, self.btn_pos_check, stretch_at=0, spacing=5))
-        h3.addWidget(self.lbl_diff)
-        dl.addWidget(self.pill_c2, 145)
-        dl.addWidget(self.pill_c1, 80)
-        dl.addWidget(pos_card, 125)
-        main_col.addWidget(self.card_dash)
-
-        # بطاقة التشغيل
-        self.card_actions = Card()
-        al = QVBoxLayout(self.card_actions)
-        al.setContentsMargins(10, 8, 10, 8)
-        al.setSpacing(5)
-        self.btn_run = Button("", command=self.start_thread, role="primary", big=True)
-        self.btn_run.setMinimumHeight(34)
-        al.addWidget(self.btn_run)
-        self.progress_bar = Progress()
-        self.progress_bar.set(0)
-        self.lbl_progress_pct = Label("0%", size=8.5)
-        self.lbl_progress_pct.setFixedWidth(40)
-        al.addLayout(hbox(self.progress_bar, self.lbl_progress_pct, stretch_at=0, spacing=8))
-        self.lbl_current_file = Label("", size=7.6, bold=False, color_key="muted")
-        self.lbl_current_file.lbl.setLayoutDirection(Qt.LeftToRight)
-        al.addWidget(self.lbl_current_file)
-        self.btn_manual = Button("", command=self.open_manual)
-        self.btn_summary_reopen = Button("", command=self.reopen_summary_modal)
-        self.btn_cash = Button("", command=self.open_cash_counter)
-        self.btn_archive_downloads = Button("", command=self.open_downloads_archiver_dialog)
-        self.btn_reset = Button("", command=self.confirm_and_reset, role="danger", icon="reset")
-        ag = QHBoxLayout()
-        ag.setSpacing(6)
-        for b, s in ((self.btn_manual, 10), (self.btn_summary_reopen, 10), (self.btn_cash, 10),
-                     (self.btn_archive_downloads, 10), (self.btn_reset, 8)):
-            b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            ag.addWidget(b, s)
-        al.addLayout(ag)
-        main_col.addWidget(self.card_actions)
-        main_col.addStretch(1)
-
-        # «آخر العمليات»
+        # «آخر العمليات» (خط زمني)
         self.card_ops = Card()
         ol = QVBoxLayout(self.card_ops)
-        ol.setContentsMargins(8, 8, 8, 6)
-        ol.setSpacing(2)
-        self.lbl_ops_title = Label("", size=9.5)
+        ol.setContentsMargins(10, 9, 8, 6)
+        ol.setSpacing(3)
+        self.lbl_ops_title = Label("", size=9.8)
         self.btn_ops_link = Button("", command=self.open_records_viewer, role="link")
         ol.addLayout(hbox(self.lbl_ops_title, None, self.btn_ops_link))
         self.ops_list = OpsList()
         ol.addWidget(self.ops_list, 1)
         self.lbl_ops_empty = Label("", size=8, bold=False, color_key="muted", align=Qt.AlignCenter, wrap=True)
         ol.addWidget(self.lbl_ops_empty)
-        self.card_ops.setFixedWidth(196)
-
-        grid.addLayout(main_col, 0, 0)
-        grid.addWidget(self.card_ops, 0, 1)
-        grid.setColumnStretch(0, 1)
-        root.addWidget(self.body_full, 1)
-
-        # ===== الشريط السفلي: مجموعات معنونة =====
-        self.b_bar = QWidget()
-        bl = QVBoxLayout(self.b_bar)
-        bl.setContentsMargins(10, 7, 10, 0)
-        bl.setSpacing(0)
-        bar_card = Card()
-        bcl = QHBoxLayout(bar_card)
-        bcl.setContentsMargins(10, 5, 10, 6)
-        bcl.setSpacing(18)
-        bcl.addStretch(1)
-        self._bar_captions = []  # (label, ar, en)
-
-        def _mk_group(cap_ar, cap_en, buttons):
-            col = QVBoxLayout()
-            col.setSpacing(3)
-            cap = Label(T2(cap_ar, cap_en), size=7.2, color_key="muted")
-            self._bar_captions.append((cap, cap_ar, cap_en))
-            col.addWidget(cap)
-            row = QHBoxLayout()
-            row.setSpacing(5)
-            for b in buttons:
-                row.addWidget(b)
-            col.addLayout(row)
-            bcl.addLayout(col)
-
-        self.btn_view_rec = Button("", command=self.open_records_viewer, role="soft")
-        self.btn_arch_full = Button("", command=self.open_archive_history, role="soft")
-        self.btn_chrome = Button("", command=self.open_chrome_browser)
-        self.btn_pdf_export = Button("", command=self.export_pdf_summary)
-        self.btn_excel = Button("", command=self.open_excel)
-        self.btn_print_slip = Button("", command=self.print_slip)
-        _mk_group("العرض", "View", [self.btn_view_rec, self.btn_arch_full, self.btn_chrome])
-        _mk_group("التقارير", "Reports", [self.btn_pdf_export, self.btn_excel])
-        _mk_group("الطباعة", "Print", [self.btn_print_slip])
-        bcl.addStretch(1)
-        # النسخة دي: زر سجل الأرشيف والإكسيل للمشرف، وبوابة المرور بعد الدخول (unlock_full_console)
-        self.btn_arch_full.hide()
-        self.btn_excel.hide()
-        self.btn_chrome.hide()
-        bl.addWidget(bar_card)
         # عدادات شريط الحالة (موجودة زي الكونسول بس مش ظاهرة فيه)
         self.lbl_status_count = Label("")
         self.lbl_status_sum = Label("")
         self.lbl_status_count.hide()
         self.lbl_status_sum.hide()
-        self.lbl_foot = Label(FOOT_TEXT, size=7.2, color_key="muted", align=Qt.AlignCenter)
-        bl.addWidget(self.lbl_foot, 0, Qt.AlignHCenter)
-        bl.addSpacing(3)
-        root.addWidget(self.b_bar)
+        self.lbl_foot = Label(FOOT_TEXT, size=6.6, bold=False, color_key="muted", align=Qt.AlignCenter)
+        ol.addWidget(self.lbl_foot)
+        self.card_ops.setFixedWidth(240)
+
+        bf.addWidget(main_w, 1)
+        bf.addWidget(self.card_ops)
+        right.addWidget(self.body_full, 1)
+
         self._status_count_val = 0
         self._status_total_val = 0.0
         self._render_status_bar(0, 0.0)
         self.body_full.hide()
         self.b_bar.hide()
+        self._dock_chrome(full=False)
+
+    def _dock_chrome(self, full):
+        """الشعار واللغة والصوت: في الشريط الجانبي في النسخة الكاملة، وفي الهيدر في الميني (الشريط مستخبي)."""
+        hl = self._hl
+        if full:
+            self._rail_l.insertWidget(0, self.lbl_logo)
+            for b in (self.btn_lang, self.btn_mute):
+                b._icon_only = False
+                b.set_stacked(True)
+                b.setFixedHeight(36 if getattr(self, "_compact", False) else 40)   # بعد set_stacked: الستايل كان بيرجّع الارتفاع الأدنى
+                self._rail_tail.addWidget(b)
+            self._cap_reports.setVisible(not self.btn_excel.isHidden())
+            self._hl.setContentsMargins(8, 0, 8, 0)
+            self.clock_pill.layout().setContentsMargins(9, 1, 9, 1)
+            self.lbl_clock._fixed_icon = "clock"
+            self.layout().setContentsMargins(8, 8, 8, 8)
+            self.rail.show()
+        else:
+            self.rail.hide()
+            # الميني ضيقة (440): هيدر مضغوط زي القديم
+            hl.setContentsMargins(6, 0, 6, 0)
+            self.clock_pill.layout().setContentsMargins(6, 1, 6, 1)
+            self.lbl_clock._fixed_icon = None
+            self.layout().setContentsMargins(5, 5, 5, 5)
+            hl.insertWidget(0, self.lbl_logo)
+            idx = hl.indexOf(self.btn_mode)
+            for b in (self.btn_mute, self.btn_lang):
+                b.setMinimumHeight(0)
+                b.setMaximumHeight(16777215)
+                b._icon_only = True   # الهيدر في الميني ضيق: أيقونة بس والكلام في التلميح
+                b.set_stacked(False, "pill")
+                hl.insertWidget(idx + 1 if idx >= 0 else hl.count(), b)
+        self.lbl_clock.configure(text=self.lbl_clock.cget("text"))
+        self._paint_logo()
+        try:
+            self._fill_theme_combo()
+        except Exception:
+            pass
+
+    def _paint_logo(self):
+        p = PAL[ThemeState.key]
+        rail = self.rail.isVisible() or not getattr(self, "is_mini_mode", True)
+        ver = (f'<br><span style="font-size:7.5pt; font-weight:600; color:{p["muted"]}">{APP_VERSION}</span>' if rail else "")
+        self.lbl_logo.setText(f'<span style="font-weight:900; font-size:{15 if rail else 13}pt; letter-spacing:1px; color:{p["acc"]}">A2R</span>'
+                              + ver)
+
+    def paintEvent(self, e):
+        rtl = self.layoutDirection() == Qt.RightToLeft
+        key = (ThemeState.key, self.width(), self.height(), rtl)
+        if self._bg_cache is None or self._bg_cache[0] != key:
+            self._bg_cache = (key, ui.build_glass_background(ThemeState.key, self.width(), self.height(), rtl))
+        pa = QPainter(self)
+        pa.drawPixmap(0, 0, self._bg_cache[1])
+        pa.end()
 
     def _install_tooltips(self):
         tips = {
@@ -7769,7 +8422,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
             "btn_mini_reprint": T2("إعادة طباعة آخر إيصال (في حالة نفاد الورق أو انحشاره)", "Reprint the last receipt (if paper ran out or jammed)"),
             "btn_reset": T2("مسح النتائج وإرجاع المسار والتاريخ (بيطلب تأكيد)", "Clear results and reset path/date (asks to confirm)"),
             "btn_view_rec": T2("عرض السجلات", "Records viewer"),
-            "btn_pdf_export": T2("تصدير ملخص PDF", "Export PDF summary"),
+            "btn_pdf_export": T2("ملخص الفحص: اختار الوحدة ويتفتح إيصال الملخص PDF", "Inspection summary: pick the unit, then the summary slip PDF opens"),
             "btn_excel": T2("فتح ملف الإكسيل", "Open Excel file"),
             "btn_arch_full": T2("سجل الأرشيف الكامل (كل الأيام)", "Full archive history (all days)"),
             "btn_chrome": T2("فتح المتصفح", "Open browser"),
@@ -7788,10 +8441,17 @@ class MainWindow(QWidget, core.ConsoleLogic):
 
     # ---------- الثيم ----------
     def _theme_picked(self, label):
-        for key, (ar, en) in ui.THEME_LABELS.items():
+        # القايمة فيها الألوان التلاتة؛ الفاتح/الغامق من الزرار اللي جنبها
+        for pal, (ar, en) in ui.PALETTE_LABELS.items():
             if label in (ar, en):
-                self.on_theme_select(key)
+                key = pal + "-" + ui.theme_mode(ThemeState.key)
+                if key != ThemeState.key:
+                    self.on_theme_select(key)
                 return
+
+    def _toggle_mode(self):
+        mode = "dark" if ui.is_light() else "light"
+        self.on_theme_select(ui.theme_palette(ThemeState.key) + "-" + mode)
 
     def on_theme_select(self, selected_theme):
         self.current_theme_name = selected_theme
@@ -7799,7 +8459,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         _save_app_prefs(theme=selected_theme)
 
     def apply_theme(self, name):
-        ThemeState.key = name if name in PAL else "dark"
+        ThemeState.key = name if name in PAL else ui.DEFAULT_THEME
         self.current_theme_name = ThemeState.key
         app = QApplication.instance()
         app.setStyleSheet(ui.build_qss(ThemeState.key))
@@ -7811,18 +8471,26 @@ class MainWindow(QWidget, core.ConsoleLogic):
             except RuntimeError: pass
         try: self.f_role_btn.restyle()
         except Exception: pass
-        p = PAL[ThemeState.key]
-        self.lbl_logo.setText(f'<span style="font-weight:900; font-size:15pt; letter-spacing:1px; color:{p["acc"]}">A2R</span>'
-                              f'<span style="font-size:7.5pt; font-weight:600; color:{p["muted"]}">&nbsp;{APP_VERSION}</span>')
+        self._paint_logo()
         self._fill_theme_combo()
-        self.ops_list.viewport().update()
+        self._bg_cache = None
+        self.update()
+        for w in (self.ops_list.viewport(), self.progress_bar, self.sw_autosync, self.sw_autoprint):
+            w.update()
         self.update_toggle_appearance()
         self._refresh_mini_archive_label()
 
     def _fill_theme_combo(self):
-        labs = [ui.THEME_LABELS[k][0 if self.current_lang == "ar" else 1] for k in ("light", "dark")]
+        i = 0 if self.current_lang == "ar" else 1
+        labs = [ui.PALETTE_LABELS[k][i] for k in ui.PALETTES]
         self.cb_theme.configure(values=labs)
-        self.cb_theme.set(ui.THEME_LABELS[ThemeState.key][0 if self.current_lang == "ar" else 1])
+        self.cb_theme.set(ui.PALETTE_LABELS[ui.theme_palette(ThemeState.key)][i])
+        fm = QFontMetrics(self.cb_theme.lineEdit().font())
+        self.cb_theme.setFixedWidth(max(96, max(fm.horizontalAdvance(x) for x in labs) + 46))
+        # الزرار بيوري الوضع اللي هيتحول له
+        nxt = "dark" if ui.is_light() else "light"
+        self.btn_mode.configure(text=ui.MODE_LABELS[nxt][i] if not self.is_mini_mode else ui.MODE_LABELS[nxt][i].split(" ")[0])
+        self.btn_mode.setToolTip(T2("فاتح / غامق", "Light / Dark"))
 
     # ---------- اللغة ----------
     def apply_language(self, lang):
@@ -7832,12 +8500,20 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.setLayoutDirection(Qt.RightToLeft if rtl else Qt.LeftToRight)
         self.e_path.setLayoutDirection(Qt.LeftToRight)
         # عنوان «مسار المجلد» و«التاريخ» بنفس العرض عشان الخانات تيجي تحت بعض
-        fm = QFontMetrics(self.lbl_folder.lbl.font())
-        lw = max(fm.horizontalAdvance(self.lbl_folder.lbl.text()), fm.horizontalAdvance(self.lbl_d.lbl.text())) + 10
+        # +48 (مش +30): الخط البديل أعرض من Segoe UI فآخر حرف في REPORT DATE كان بيتقص
+        fm = QFontMetrics(self.lbl_folder._full_font())
+        # العنوان بيقيس نفسه دلوقتي (أيقونة + الكلام كامل)، فمش محتاجين الـ +48 اللي كانت بتاكل مكان زرار «أمس»
+        lw = max(fm.horizontalAdvance(self.lbl_folder.text()), fm.horizontalAdvance(self.lbl_d.text())) + 14 + 5 + 6
         self.lbl_folder.setFixedWidth(lw)
         self.lbl_d.setFixedWidth(lw)
         self.lbl_ops_title.configure(text=T2("آخر العمليات", "Recent operations"))
         self.btn_ops_link.setText(T2("عرض السجلات ←", "View records →"))
+        self.btn_ops_link.updateGeometry()
+        need = self.lbl_ops_title.sizeHint().width() + self.btn_ops_link.sizeHint().width() + 6 + 18 + 8
+        self.card_ops.setFixedWidth(max(240, min(need, 300)))
+        # طلب أحمد: زرار ملخص الـ PDF (نفس شغله: يختار الوحدة ويفتح إيصال الملخص) بقى اسمه «ملخص الفحص»
+        self.btn_pdf_export.configure(text=T2("📊 ملخص الفحص", "📊 Inspection summary"))
+        self.lbl_ring_sub.configure(text=T2("تمت المعالجة", "Processed"))
         self._fill_theme_combo()
         self._install_tooltips()
         self._ops_sig = None
@@ -8442,8 +9118,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
             tr_ = Tree(columns=columns, headers=headers, widths=widths)
             for kind, (bg, fg) in tagc.items():
                 tr_.tag_configure(kind, background=bg, foreground=fg)
-            if ThemeState.key == "dark":
-                tr_.tag_configure("odd", background="#16202B", foreground=p_["text"])
+            if not is_light():
+                tr_.tag_configure("odd", background=ThemeState.p()["odd"], foreground=p_["text"])
             return tr_
 
         def card_wrap(w):
@@ -9138,8 +9814,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         tree = Tree(columns=columns, headers=headers, widths=_COL_W)
         for kind, (bg, fg) in tagc.items():
             tree.tag_configure(kind, background=bg, foreground=fg)
-        if ThemeState.key == "dark":
-            tree.tag_configure("odd", background="#16202B", foreground=ThemeState.p()["text"])
+        if not is_light():
+            tree.tag_configure("odd", background=ThemeState.p()["odd"], foreground=ThemeState.p()["text"])
         tc = Card(); tcl = QVBoxLayout(tc); tcl.setContentsMargins(2, 2, 2, 2); tcl.addWidget(tree)
         lay.addWidget(tc, 1)
 
@@ -9602,7 +10278,13 @@ class MainWindow(QWidget, core.ConsoleLogic):
         e_manual_cash.bind("<KeyRelease>", recalc)
         e_pos_in.bind("<KeyRelease>", recalc)
 
-        for d in denoms:
+        # شاشة قصيرة (مثلاً 1366×768 بتكبير 150%): الفئات في عمودين بدل عمود واحد عشان الشاشة تدخل كلها
+        _short = QGuiApplication.primaryScreen().availableGeometry().height() - 34 < 560
+        _grid = None
+        if _short:
+            _grid = QGridLayout(); _grid.setHorizontalSpacing(14); _grid.setVerticalSpacing(3)
+            fbl.addLayout(_grid)
+        for _i, d in enumerate(denoms):
             lab = Label(tr("cash_denom_lbl", d=d), size=9); lab.setFixedWidth(95)
             e = Entry(justify="center"); e.setFixedWidth(90)
             lbl_s = Label("= 0", size=8.5); lbl_s.setFixedWidth(95)
@@ -9610,7 +10292,10 @@ class MainWindow(QWidget, core.ConsoleLogic):
             sub_lbls[d] = lbl_s
             e.bind("<KeyRelease>", recalc)
             entries[d] = e
-            fbl.addLayout(hbox(lab, None, e, lbl_s))
+            if _grid is not None:
+                _grid.addLayout(hbox(lab, None, e, lbl_s), _i % 4, _i // 4)
+            else:
+                fbl.addLayout(hbox(lab, None, e, lbl_s))
         lay.addWidget(sum_card)
 
         def clear_cash():
@@ -9633,7 +10318,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         lay.addLayout(hbox(btn_apply, b_reset, stretch_at=0, spacing=8))
         win.bind("<Return>", apply_and_close)
         recalc()
-        win.show_centered(self, 410, 470, focus=e_manual_cash)
+        win.show_centered(self, 620 if _short else 410, 0 if _short else 470, focus=e_manual_cash)
 
 
 def _restore_geom(win, key):
@@ -9650,10 +10335,19 @@ def _restore_geom(win, key):
             if m:
                 w, h, x, y = map(int, m.groups())
         w = max(min(w, scr.width()), min(LOG_WIN_MIN_W, scr.width() - 48))
-        h = max(min(h, scr.height()), min(LOG_WIN_MIN_H, scr.height() - 100))
+        h = max(min(h, scr.height() - 34), min(LOG_WIN_MIN_H, scr.height() - 100))   # 34 = شريط العنوان
         x = max(scr.left(), min(x, scr.right() - 120))
         y = max(scr.top(), min(y, scr.bottom() - 80))
         win.setMinimumSize(min(LOG_WIN_MIN_W, scr.width() - 48), min(LOG_WIN_MIN_H, scr.height() - 100))
+        try:   # مش أضيق من اللي الأزرار والكلام محتاجينه
+            lm = win.layout().minimumSize() if win.layout() is not None else None
+            if lm is not None:
+                w = max(w, min(lm.width(), scr.width() - 16))
+                h = max(h, min(lm.height(), scr.height() - 34))
+                win.setMinimumSize(max(win.minimumWidth(), min(lm.width(), scr.width() - 16)),
+                                   max(win.minimumHeight(), min(lm.height(), scr.height() - 34)))
+        except Exception as _e:
+            _log_silent("restore_geom_min", _e)
         win.resize(w, h)
         win.move(x, y)
     except Exception as e:
