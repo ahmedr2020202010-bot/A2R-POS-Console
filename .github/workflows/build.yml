@@ -15,6 +15,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read version
+        shell: pwsh
+        run: |
+          # رقم الإصدار بيتقري من collect.py (السطر APP_VERSION = "v...") — بيتغير لوحده مع كل نسخة
+          $m = Select-String -Path collect.py -Pattern '^APP_VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $m) { Write-Error "APP_VERSION not found in collect.py"; exit 1 }
+          $v = $m.Matches[0].Groups[1].Value
+          if ($v -notmatch '^[A-Za-z0-9._-]+$') { Write-Error "Bad APP_VERSION: $v"; exit 1 }
+          "APP_VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "EXE_NAME=A2R_SYSTEM_$v.exe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Version: $v"
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -58,10 +70,15 @@ jobs:
           python -m PyInstaller @pyArgs
           if (-not (Test-Path "dist/A2R POS Console.exe")) { Write-Error "Build failed"; exit 1 }
 
+      - name: Name exe with version
+        shell: pwsh
+        run: |
+          Copy-Item "dist/A2R POS Console.exe" "dist/$env:EXE_NAME"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: A2R POS Console
-          path: dist/A2R POS Console.exe
+          name: A2R SYSTEM ${{ env.APP_VERSION }}
+          path: dist/${{ env.EXE_NAME }}
 
       - name: Publish release (keep latest two)
         shell: pwsh
@@ -69,7 +86,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $tag = "build-${{ github.run_number }}"
-          Copy-Item "dist/A2R POS Console.exe" "dist/A2R_POS_Console.exe"
-          gh release create $tag "dist/A2R_POS_Console.exe" --title "A2R POS Console (build ${{ github.run_number }})" --notes "Built from ${{ github.sha }}"
+          gh release create $tag "dist/$env:EXE_NAME" --title "A2R SYSTEM $env:APP_VERSION (build ${{ github.run_number }})" --notes "A2R SYSTEM $env:APP_VERSION - Built from ${{ github.sha }}"
           $old = gh release list --limit 100 --json tagName --jq '.[].tagName' | Where-Object { $_ -like "build-*" } | Select-Object -Skip 2
           foreach ($t in $old) { gh release delete $t --yes --cleanup-tag }
