@@ -121,7 +121,7 @@ try:
 except ImportError:
     PYPDF_AVAILABLE = False
 
-APP_VERSION = "v100"
+APP_VERSION = "v101"
 APP_OWNER = "Ahmed Ramadan"
 
 _SILENT_SEEN = {}
@@ -6415,6 +6415,7 @@ ICON_PATHS = dict(
     expand="M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5", maximize="M4 4h16v16H4zM4 9h16",
     clock="M12 3a9 9 0 1 0 0 18a9 9 0 0 0 0-18M12 7v5l3 2",
     arrowl="M19 12H5M11 6l-6 6l6 6", arrowr="M5 12h14M13 6l6 6l-6 6", archive="M3 4h18v4H3zM5 8v12h14V8M10 12h4",
+    sliders="M4 6h9M17 6h3M4 12h3M11 12h9M4 18h11M19 18h1M15 4v4M9 10v4M17 16v4",   # v101: «الافتراضي»
 )
 EMOJI_ICON = {
     "🌐": "globe", "⚡": "bolt", "➕": "plus", "📊": "chart", "🖨": "printer", "📚": "books", "🔍": "search",
@@ -8822,6 +8823,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
         h = min(max(h, ms.height()), scr.height() - 34)
         self.setFixedSize(w, h)
         self.move(scr.left() + (scr.width() - w) // 2, scr.top() + (scr.height() - h) // 2)
+        self._fit_defaults()
 
     def _set_density(self, compact):
         if getattr(self, "_compact", None) == compact:
@@ -9035,6 +9037,9 @@ class MainWindow(QWidget, core.ConsoleLogic):
         hl.addWidget(self.cb_theme)
         self.btn_mode = Button("", command=self._toggle_mode, role="pill")
         hl.addWidget(self.btn_mode)
+        # v101: «الافتراضي» — بيرجّع الصوت والشكل واللغة للأصل (بعد تأكيد). مش بيلمس أي بيانات
+        self.btn_defaults = Button("", command=self.reset_ui_defaults, role="pill", icon="sliders")
+        hl.addWidget(self.btn_defaults)
         self.btn_back_to_mini = Button(tr("btn_back_mini"), command=self.switch_to_mini_view, role="pill", icon="mini")
         hl.addWidget(self.btn_back_to_mini)
         right.addWidget(self.header)
@@ -9053,7 +9058,8 @@ class MainWindow(QWidget, core.ConsoleLogic):
         self.btn_fix_printer = Button(self._paper_btn_text(), command=self.fix_printer_paper_action)
         self.btn_fix_printer.setMinimumHeight(22)
         self.btn_fix_printer.setMaximumHeight(24)
-        cl.addLayout(hbox(self.lbl_mini_title, None, self.btn_fix_printer))
+        self._mini_top = hbox(self.lbl_mini_title, None, self.btn_fix_printer)   # v101: «الافتراضي» بيتحط هنا في الميني
+        cl.addLayout(self._mini_top)
         self.lbl_mini_desc = Label(tr("mini_status_active"), size=8.5, color_key="ok")
         cl.addWidget(self.lbl_mini_desc)
         self.lbl_mini_counter = Label(tr("mini_printed_count", count=0), size=8.5, color_key="muted")
@@ -9244,6 +9250,7 @@ class MainWindow(QWidget, core.ConsoleLogic):
                 b.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
                 self._rail_tail.addWidget(b, 1)
             self._cap_reports.setVisible(not self.btn_excel.isHidden())
+            self._dock_defaults(full=True)
             self._hl.setContentsMargins(8, 0, 8, 0)
             self.clock_pill.layout().setContentsMargins(9, 1, 9, 1)
             self.lbl_clock._fixed_icon = "clock"
@@ -9265,12 +9272,34 @@ class MainWindow(QWidget, core.ConsoleLogic):
                 b._icon_only = True   # الهيدر في الميني ضيق: أيقونة بس والكلام في التلميح
                 b.set_stacked(False, "pill")
                 hl.insertWidget(idx + 1 if idx >= 0 else hl.count(), b)
+            self._dock_defaults(full=False)
         self.lbl_clock.configure(text=self.lbl_clock.cget("text"))
         self._paint_logo()
         try:
             self._fill_theme_combo()
         except Exception:
             pass
+
+    def _dock_defaults(self, full):
+        """v101: زرار «الافتراضي»: في الهيدر جنب فاتح/غامق في النسخة الكاملة، وفي الميني جنب زرار مقاس الورق
+        (هيدر الميني مليان ومكانش بيساع)."""
+        b = getattr(self, "btn_defaults", None)
+        if b is None:
+            return
+        for lay in (self._hl, self._mini_top):
+            if lay.indexOf(b) >= 0:
+                lay.removeWidget(b)
+        if full:
+            b.setMinimumHeight(0)
+            b.setMaximumHeight(16777215)
+            i = self._hl.indexOf(self.btn_mode)
+            self._hl.insertWidget(i + 1 if i >= 0 else self._hl.count(), b)
+        else:
+            b.setMinimumHeight(22)
+            b.setMaximumHeight(24)
+            i = self._mini_top.indexOf(self.btn_fix_printer)
+            self._mini_top.insertWidget(i if i >= 0 else self._mini_top.count(), b)
+        b.show()
 
     def _paint_logo(self):
         p = PAL[ThemeState.key]
@@ -9370,6 +9399,69 @@ class MainWindow(QWidget, core.ConsoleLogic):
         nxt = "dark" if ui.is_light() else "light"
         self.btn_mode.configure(text=ui.MODE_LABELS[nxt][i] if not self.is_mini_mode else ui.MODE_LABELS[nxt][i].split(" ")[0])
         self.btn_mode.setToolTip(T2("فاتح / غامق", "Light / Dark"))
+        # v101: في الميني الهيدر ضيق → أيقونة بس والكلام في التلميح (زي اللغة والصوت)
+        bd = getattr(self, "btn_defaults", None)
+        if bd is not None:
+            bd._icon_only = bool(self.is_mini_mode)
+            bd.configure(text=T2("الافتراضي", "Defaults"))
+            bd.setToolTip(T2("إرجاع الإعدادات الافتراضية (الصوت والشكل واللغة)",
+                             "Reset to defaults (sound, look and language)"))
+            bd.updateGeometry()
+            QTimer.singleShot(0, self._fit_defaults)
+
+    def _fit_defaults(self):
+        """v101: لو الهيدر مش ساع الكلام (شاشة صغيرة + تكبير 150%) زرار «الافتراضي» بيبقى أيقونة بس والكلام في التلميح."""
+        b = getattr(self, "btn_defaults", None)
+        if b is None or self.is_mini_mode:
+            return
+        try:
+            b._icon_only = False
+            b.updateGeometry()
+            self._hl.invalidate(); self._hl.activate()
+            if self._hl.minimumSize().width() > self.header.width():
+                b._icon_only = True
+                b.updateGeometry()
+                self._hl.invalidate(); self._hl.activate()
+            b.update()
+        except Exception as e:
+            core._log_silent("fit_defaults", e)
+
+    # ---------- v101: إرجاع الإعدادات الافتراضية ----------
+    def reset_ui_defaults(self):
+        """بيرجّع تفضيلات الشكل بس: الصوت (مكتوم زي lite2)، الثيم (جرافيت فضي غامق)، اللغة (English)،
+        ومقاس/مكان نوافذ السجلات. الإيصالات والسجلات والأرشيف والطابعة ومقاس الورق والباسوردات والمفاتيح مش بتتلمس."""
+        msg = T2("هترجع الإعدادات دي للأصل:\n"
+                 "• الصوت: مكتوم\n"
+                 "• الشكل: جرافيت فضي غامق\n"
+                 "• اللغة: English\n"
+                 "• مقاس ومكان نوافذ السجلات\n\n"
+                 "الإيصالات والسجلات والأرشيف والطابعة ومقاس الورق والباسوردات مش هتتأثر.\n\nأكمّل؟",
+                 "These settings will go back to their defaults:\n"
+                 "• Sound: muted\n"
+                 "• Look: Graphite silver (dark)\n"
+                 "• Language: English\n"
+                 "• Size and position of the records windows\n\n"
+                 "Receipts, records, archive, printer, paper size and passwords are not touched.\n\nContinue?")
+        if not messagebox.askyesno(T2("إرجاع الإعدادات الافتراضية", "Reset to defaults"), msg, parent=self):
+            return
+        try:
+            core.SOUND_MUTED = True
+            self.btn_mute.configure(text="🔇 Muted")
+        except Exception as e:
+            core._log_silent("reset_defaults#sound", e)
+        try:
+            if self.current_lang != "en":
+                self.toggle_language()
+        except Exception as e:
+            core._log_silent("reset_defaults#lang", e)
+        try:
+            self.on_theme_select(ui.DEFAULT_THEME)
+        except Exception as e:
+            core._log_silent("reset_defaults#theme", e)
+        core._save_app_prefs(sound_muted=True, lang="en", theme=ui.DEFAULT_THEME, win_geom={})
+        quiet_toast(T2("الإعدادات الافتراضية", "Defaults"),
+                    T2("رجعت الإعدادات الافتراضية: صوت مكتوم، جرافيت فضي غامق، English",
+                       "Defaults restored: sound muted, Graphite silver dark, English"), 4000)
 
     # ---------- اللغة ----------
     def apply_language(self, lang):
